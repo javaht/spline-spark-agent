@@ -20,61 +20,23 @@ class OpenmetadaLineageDispatcher extends AbstractJsonLineageDispatcher {
 
   override def name = "OpenMetada"
   override protected def send(exeplan: String): Unit = {
+    val source = makeLine(exeplan)._1
+    val target = makeLine(exeplan)._2
 
-
-
-
-
-
-
-
-    val openMetadataJWTClientConfig  = new OpenMetadataJWTClientConfig()
-    openMetadataJWTClientConfig.setJwtToken("eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZG1pbiIsImlzQm90IjpmYWxzZSwiaXNzIjoib3Blbi1tZXRhZGF0YS5vcmciLCJpYXQiOjE2NjM5Mzg0NjIsImVtYWlsIjoiYWRtaW5Ab3Blbm1ldGFkYXRhLm9yZyJ9.tS8um_5DKu7HgzGBzS1VTA5uUjKWOCU0B_j08WXBiEC0mr0zNREkqVfwFDD-d24HlNEbrqioLsBuFRiwIWKc1m_ZlVQbG7P36RUxhuv2vbSp80FKyNM-Tj93FDzq91jsyNmsQhyNv_fNr3TXfzzSPjHt8Go0FMMP66weoKMgW2PbXlhVKwEuXUHyakLLzewm9UMeQaEiRzhiTMU3UkLXcKbYEJJvfNFcLwSl9W8JCO_l0Yj3ud-qt_nQYEZwqW6u5nfdQllN133iikV4fM5QZsMCnm8Rq1mvLR0y9bmJiD7fwM1tmJ791TUWqmKaTnP49U493VanKpUAfzIiOiIbhg")
-    val openMetadataConnection = new OpenMetadataConnection()
-    openMetadataConnection.setHostPort("http://localhost:8585/api");
-    openMetadataConnection.setAuthProvider(AuthProvider.OPENMETADATA);
-    openMetadataConnection.setSecurityConfig(openMetadataJWTClientConfig);
-    val openMetadataGateway = new OpenMetadata(openMetadataConnection);
-    val lineageApi = openMetadataGateway.buildClient(classOf[LineageApi])
-
-
-
-    // 构建源实体引用
-    val fromEntity = new EntityReference();
-    fromEntity.setId(UUID.fromString("source-entity-id"));
-    fromEntity.setType("table");
-    fromEntity.setName("")
-
-    // 构建目标实体引用
-    val toEntity = new EntityReference();
-    toEntity.setId(UUID.fromString("target-entity-id"));
-    toEntity.setType("table");
-
-    // 构建血缘关系详情
-    val lineageDetails = new LineageDetails();
-    lineageDetails.setCreatedAt(System.currentTimeMillis());
-    lineageDetails.setCreatedBy("user");
-    lineageDetails.setUpdatedAt(System.currentTimeMillis());
-    lineageDetails.setUpdatedBy("user");
-
-    // 构建 EntitiesEdge 对象
-    val entitiesEdge = new EntitiesEdge();
-    entitiesEdge.setFromEntity(fromEntity);
-    entitiesEdge.setToEntity(toEntity);
-    entitiesEdge.setLineageDetails(lineageDetails);
-
-    // 构建 AddLineage 对象
-    val addLineage = new AddLineage();
-    addLineage.setEdge(entitiesEdge);
-
-    lineageApi.addLineageEdge(addLineage);
 
 
   }
 
 
-  def makeLine(exeplan: String): Unit = {
-    var downstreamUrn: String = ""
+  def getIdByfqn(): Unit = {
+
+
+
+
+  }
+
+  def makeLine(exeplan: String): (String,String) = {
+
 
     val operations: JSONObject  = JSON.parseObject(exeplan).getJSONObject("operations");
 
@@ -84,8 +46,10 @@ class OpenmetadaLineageDispatcher extends AbstractJsonLineageDispatcher {
 
     val params: JSONObject = write.getJSONObject("params")
 
-    val targetDatabase: String = params.getString("hoodie.datasource.hive_sync.database")//目标数据库
-    val targetTablename: String = params.getString("hoodie.datasource.hive_sync.table") //目标表
+    val targetDatabase: String = params.getString("database")//目标数据库
+    val targetTablename: String = params.getString("table") //目标表
+
+    val targetset: String = targetDatabase+"."+targetTablename
 
     val sourset: mutable.LinkedHashSet[String] = new mutable.LinkedHashSet[String] //定义一个不允许重复的集合
     for (i <- 0 until readsArray.size) {
@@ -95,14 +59,7 @@ class OpenmetadaLineageDispatcher extends AbstractJsonLineageDispatcher {
       sourset.add(sourceDatabase + "." + sourceTable)
     }
 
-
-
-
-
-    val jsonParamList = mutable.LinkedHashSet[String]();
-
-
-
+     (String.valueOf(sourset),targetset)
   }
 
 
