@@ -128,11 +128,15 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
   }
   private def getStringValue(json: JSONObject, path: String): String = {
     try {
-      path.split("\\.").foldLeft(json) { (obj, key) =>
-        if (obj != null) obj.getJSONObject(key) else null
-      } match {
-        case null => ""
-        case obj => obj.toString
+      val keys = path.split("\\.")
+      val lastIndex = keys.length - 1
+      val parentObj = keys.dropRight(1).foldLeft(json) { (obj, key) =>
+        if (obj != null && obj.containsKey(key)) obj.getJSONObject(key) else null
+      }
+      if (parentObj != null && parentObj.containsKey(keys(lastIndex))) {
+        parentObj.getString(keys(lastIndex))
+      } else {
+        ""
       }
     } catch {
       case _: Exception => ""
