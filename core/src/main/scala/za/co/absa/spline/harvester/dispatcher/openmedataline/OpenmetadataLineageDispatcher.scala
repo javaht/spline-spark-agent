@@ -16,7 +16,6 @@
  * 
  */
 package za.co.absa.spline.harvester.dispatcher.openmedataline
-
 import org.apache.commons.configuration.Configuration
 import org.apache.commons.lang.StringUtils
 import okhttp3.{MediaType, OkHttpClient, Request, Response}
@@ -26,48 +25,65 @@ import scala.collection.mutable
 import com.alibaba.fastjson2.{JSON, JSONArray, JSONObject}
 import za.co.absa.spline.harvester.dispatcher.AbstractJsonLineageDispatcher
 
+import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
 
-class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherConfig) extends AbstractJsonLineageDispatcher  with Logging {
+class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherConfig) extends AbstractJsonLineageDispatcher with Logging {
 
   def this(configuration: Configuration) = this(new OpenmetadataLineageDispatcherConfig(configuration))
+
+  // 常量定义
+  private val HTTP_TIMEOUT_SECONDS = 30
+  private val CONTENT_TYPE_JSON = "application/json"
+  private val httpClient = new OkHttpClient.Builder().connectTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS).readTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS).build()
+  private val tableCache = mutable.Map[String, Map[String, Map[String, String]]]()
 
   override def name = "Openmetadata"
 
   override protected def send(data: String): Unit = {
     if (data.startsWith("ExecutionPlan")) {
-      val replaceDate = StringUtils.replace(data, "ExecutionPlan (apiVersion: 1.2):", "")
-      val tuple = getLineage(replaceDate) //这里拼接的血缘
-      if(){
-
+      val jsonData = StringUtils.replace(data, "ExecutionPlan (apiVersion: 1.2):", "")
+      val (sources, target) = getLineage(jsonData)
+      if (sources.nonEmpty && target._1.nonEmpty) {
+        makeLineage(sources, target)
+      } else {
+        logWarning("跳过空血缘关系")
       }
-      makeLineage(tuple._1, tuple._2)
     }
   }
 
-  def getLineage(replaceDate: String): (mutable.LinkedHashSet[(String,String,String)],(String,String,String)) = {
-    val operations: JSONObject  = JSON.parseObject(replaceDate).getJSONObject("operations")
+  def getLineage(jsonData: String): (mutable.LinkedHashSet[(String, String, String)], (String, String, String)) = {
+    try {
+      val operations = JSON.parseObject(jsonData).getJSONObject("operations")
+      val readsArray = operations.getJSONArray("reads")
+      val write = operations.getJSONObject("write")
 
-    val readsArray: JSONArray = operations.getJSONArray("reads") //这里开始获取数据来源
-    val write: JSONObject = operations.getJSONObject("write")
+      val targetType = getStringValue(write, "extra.destinationType")
+      val targetDatabase = getStringValue(write, "params.table.identifier.database")
+      val targetTableName = getStringValue(write, "params.table.identifier.table")
 
-    val targetype: String = write.getJSONObject("extra").getString("destinationType") //目标数据源类型
-    val targetDatabase: String = write.getJSONObject("params").getJSONObject("table").getJSONObject("identifier").getString("database") //目标数据库
-    val targetTablename: String = write.getJSONObject("params").getJSONObject("table").getJSONObject("identifier").getString("table")   //目标表
-
-    val sourset = new mutable.LinkedHashSet[(String,String,String)]
-    for (i <- 0 until readsArray.size) {
-      val readObj: JSONObject = readsArray.getJSONObject(i)
-      val sourceType = readObj.getJSONObject("extra").getString("sourceType")
-      val sourceTable: String = readObj.getJSONObject("params").getJSONObject("table").getJSONObject("identifier").getString("table")
-      val sourceDatabase: String = readObj.getJSONObject("params").getJSONObject("table").getJSONObject("identifier").getString("database")
-      val sourceTuple = getmetadataTables(sourceType, sourceDatabase, sourceTable)
-      sourset.add(sourceTuple)
+      val sources = mutable.LinkedHashSet[(String, String, String)]()
+      
+      for (i <- 0 until readsArray.size()) {
+        val readObj = readsArray.getJSONObject(i)
+        val sourceType = getStringValue(readObj, "extra.sourceType")
+        val sourceTable = getStringValue(readObj, "params.table.identifier.table")
+        val sourceDatabase = getStringValue(readObj, "params.table.identifier.database")
+        
+        if (sourceTable.nonEmpty && sourceDatabase.nonEmpty) {
+          val sourceTuple = getMetadataTables(sourceType, sourceDatabase, sourceTable)
+          sources.add(sourceTuple)
+        }
+      }
+      
+      val targetTuple = getMetadataTables(targetType, targetDatabase, targetTableName)
+      (sources, targetTuple)
+    } catch {
+      case e: Exception =>
+        logError(s"解析血缘数据失败: ${e.getMessage}")
+        (mutable.LinkedHashSet.empty, ("", "", ""))
     }
-    val targeTuple = getmetadataTables(targetype,targetDatabase, targetTablename)
-    (sourset,targeTuple)
   }
-
   def makeLineage(sourset: mutable.LinkedHashSet[(String,String,String)], targeTuple: (String,String,String)): Unit = {
     //由于不支持一个json多个血缘,所以要单独拼接
     val targetTable = targeTuple._1
@@ -110,94 +126,101 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
       handleHttpPost(stringlineage)
     }
   }
-
-  def getmetadataTables(servicetype: String,database: String, tablename: String): (String,String, String) = {
-    var  databases=""
-    if(servicetype.equals("hive")){
-      databases=  "hive.default".concat(database)
-    }
-
-    val url = s"${config.apiUrl}/api/v1/tables?databaseSchema=$databases"
-    val kvMap = handleHttpGet(url)
-    if (kvMap.contains(tablename)){
-      (tablename,kvMap(tablename).get("id").toString,kvMap(tablename).get("fullyQualifiedName").toString)
-    }else{
-      logInfo(s"未在$databases 中找到表$tablename")
-      ("","","")
+  private def getStringValue(json: JSONObject, path: String): String = {
+    try {
+      path.split("\\.").foldLeft(json) { (obj, key) =>
+        if (obj != null) obj.getJSONObject(key) else null
+      } match {
+        case null => ""
+        case obj => obj.toString
+      }
+    } catch {
+      case _: Exception => ""
     }
   }
 
-  def handleHttpGet(url: String): Map[String, Map[String,String]] = {
+  def getMetadataTables(serviceType: String, database: String, tableName: String): (String, String, String) = {
+
+    val databaseSchema = serviceType match {
+      case "hive" => s"hive.default.$database"
+      case _ => s"$serviceType.$database"
+    }
+
+    val cacheKey = s"$databaseSchema.$tableName"
+    
+    tableCache.getOrElseUpdate(cacheKey, {
+      val url = s"${config.apiUrl}/api/v1/tables?databaseSchema=$databaseSchema"
+      val tableMap = handleHttpGet(url)
+      tableMap
+    }).get(tableName) match {
+      case Some(info) => (tableName, info("id"), info("fullyQualifiedName"))
+      case None => logWarning(s"在 $databaseSchema 中未找到表: $tableName")
+        ("", "", "")
+    }
+  }
+
+  def handleHttpGet(url: String): Map[String, Map[String, String]] = {
     try {
-      val client = new OkHttpClient()
       val request = new Request.Builder()
         .url(url)
-        .addHeader("Content-Type", "application/json")
-        .addHeader("Authorization", "Bearer " + config.token)
+        .addHeader("Content-Type", CONTENT_TYPE_JSON)
+        .addHeader("Authorization", s"Bearer ${config.token}")
         .get()
         .build()
 
-      val response: Response = client.newCall(request).execute()
-      val code = response.code()
-      val responseBody = if (response.body() != null) response.body().string() else ""
+      val response = httpClient.newCall(request).execute()
+      val responseBody = Option(response.body()).map(_.string()).getOrElse("")
 
-      if (code == 200) {
+      if (response.isSuccessful) {
         val dataArray = JSON.parseObject(responseBody).getJSONArray("data")
-
-        val kvMap = dataArray.asScala.map { obj =>
-          val jsonObj = obj.asInstanceOf[com.alibaba.fastjson2.JSONObject]
+        dataArray.asScala.map { obj =>
+          val jsonObj = obj.asInstanceOf[JSONObject]
           jsonObj.getString("name") -> Map(
             "id" -> jsonObj.getString("id"),
             "fullyQualifiedName" -> jsonObj.getString("fullyQualifiedName")
           )
         }.toMap
-        kvMap
       } else {
-        System.out.println("请求失败,code=" + code + "," + responseBody + ",url=" + url)
-        Map.empty[String, Map[String,String]]
+        logError(s"HTTP GET 请求失败: ${response.code()}, URL: $url, 响应: $responseBody")
+        Map.empty[String, Map[String, String]]
       }
     } catch {
       case e: Exception =>
-        System.out.println("接口调用出现异常……")
-        e.printStackTrace()
-        Map.empty[String, Map[String,String]]
+        logError(s"HTTP GET 请求异常: ${e.getMessage}", e)
+        Map.empty[String, Map[String, String]]
     }
   }
 
   def handleHttpPost(jsonParam: String): Map[String, String] = {
     val lineageUrl = s"${config.apiUrl}/api/v1/lineage"
+    
     try {
-      val client = new OkHttpClient()
-      val jsonMediaType = MediaType.parse("application/json; charset=utf-8")
+      val jsonMediaType = MediaType.parse(CONTENT_TYPE_JSON)
       val body = RequestBody.create(jsonMediaType, jsonParam)
 
       val request = new Request.Builder()
         .url(lineageUrl)
-        .addHeader("Content-Type", "application/json")
-        .addHeader("Authorization", "Bearer " + config.token)
+        .addHeader("Content-Type", CONTENT_TYPE_JSON)
+        .addHeader("Authorization", s"Bearer ${config.token}")
         .post(body)
         .build()
 
-      val response: Response = client.newCall(request).execute()
-      val code = response.code()
-      val responseBody = if (response.body() != null) response.body().string() else ""
+      val response = httpClient.newCall(request).execute()
+      val responseBody = Option(response.body()).map(_.string()).getOrElse("")
 
-      if (code == 200) {
+      if (response.isSuccessful) {
         val dataArray = JSON.parseObject(responseBody).getJSONArray("data")
-
-        val kvMap = dataArray.asScala.map { obj =>
-          val jsonObj = obj.asInstanceOf[com.alibaba.fastjson2.JSONObject]
+        dataArray.asScala.map { obj =>
+          val jsonObj = obj.asInstanceOf[JSONObject]
           jsonObj.getString("name") -> jsonObj.getString("id")
         }.toMap
-        kvMap
       } else {
-        System.out.println("请求失败,code=" + code + "," + responseBody + ",url=" + lineageUrl)
+        logError(s"HTTP POST 请求失败: ${response.code()}, URL: $lineageUrl, 响应: $responseBody")
         Map.empty[String, String]
       }
     } catch {
       case e: Exception =>
-        System.out.println("接口调用出现异常……")
-        e.printStackTrace()
+        logError(s"HTTP POST 请求异常: ${e.getMessage}", e)
         Map.empty[String, String]
     }
   }
