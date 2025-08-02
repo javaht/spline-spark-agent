@@ -18,13 +18,12 @@
 package za.co.absa.spline.harvester.dispatcher.openmedataline
 import org.apache.commons.configuration.Configuration
 import org.apache.commons.lang.StringUtils
-import okhttp3.{MediaType, OkHttpClient, Request, Response}
+import okhttp3.{MediaType, OkHttpClient, Request}
 import okhttp3.RequestBody
 import org.apache.spark.internal.Logging
 import scala.collection.mutable
-import com.alibaba.fastjson2.{JSON, JSONArray, JSONObject}
+import com.alibaba.fastjson2.{JSON, JSONObject}
 import za.co.absa.spline.harvester.dispatcher.AbstractJsonLineageDispatcher
-
 import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
 
@@ -146,7 +145,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
   def getMetadataTables(serviceType: String, database: String, tableName: String): (String, String, String) = {
 
     val databaseSchema = serviceType match {
-      case "hive" => s"hive.default.$database"
+      case "hive" => s"${config.servicename}.default.$database"
       case _ => s"$serviceType.$database"
     }
 
