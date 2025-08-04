@@ -119,7 +119,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
            |    }
            |}
            |""".stripMargin
-      handleHttpPost(stringlineage)
+      handleHttpPut(stringlineage)
     }
   }
   private def getStringValue(json: JSONObject, path: String): String = {
@@ -167,7 +167,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
       connection.setRequestProperty("Authorization", s"Bearer ${config.token}")
       connection.setConnectTimeout(HTTP_TIMEOUT_SECONDS * 1000)
       connection.setReadTimeout(HTTP_TIMEOUT_SECONDS * 1000)
-      
+
       val responseCode = connection.getResponseCode
       val responseBody = if (responseCode >= 200 && responseCode < 300) {
         scala.io.Source.fromInputStream(connection.getInputStream).mkString
@@ -195,9 +195,9 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
     }
   }
 
-  def handleHttpPost(jsonParam: String): Map[String, String] = {
+  def handleHttpPut(jsonParam: String): Map[String, String] = {
     val lineageUrl = s"${config.apiUrl}/api/v1/lineage"
-    
+
     try {
       val connection = new java.net.URL(lineageUrl).openConnection().asInstanceOf[java.net.HttpURLConnection]
       connection.setRequestMethod("PUT")
@@ -206,11 +206,9 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
       connection.setConnectTimeout(HTTP_TIMEOUT_SECONDS * 1000)
       connection.setReadTimeout(HTTP_TIMEOUT_SECONDS * 1000)
       connection.setDoOutput(true)
-
       val outputStream = connection.getOutputStream
       outputStream.write(jsonParam.getBytes("UTF-8"))
       outputStream.close()
-
       val responseCode = connection.getResponseCode
       val responseBody = if (responseCode >= 200 && responseCode < 300) {
         scala.io.Source.fromInputStream(connection.getInputStream).mkString
@@ -218,20 +216,22 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
         scala.io.Source.fromInputStream(connection.getErrorStream).mkString
       }
 
-      if (responseCode >= 200 && responseCode < 300) {
-        val dataArray = JSON.parseObject(responseBody).getJSONArray("data")
-        dataArray.asScala.map { obj =>
-          val jsonObj = obj.asInstanceOf[JSONObject]
-          jsonObj.getString("name") -> jsonObj.getString("id")
-        }.toMap
+      if (responseBody != null && responseBody.nonEmpty) {
+        try {
+          val dataArray = JSON.parseObject(responseBody).getJSONArray("data")
+          dataArray.asScala.map { obj =>
+            val jsonObj = obj.asInstanceOf[JSONObject]
+            jsonObj.getString("name") -> jsonObj.getString("id")
+          }.toMap
+        } catch {
+          case e: Exception =>
+            println(s"解析JSON响应失败: ${e.getMessage}")
+            Map.empty[String, String]
+        }
       } else {
-        logError(s"HTTP PUT 请求失败: $responseCode, URL: $lineageUrl, 响应: $responseBody")
+        println("发送成功 无返回值")
         Map.empty[String, String]
       }
-    } catch {
-      case e: Exception =>
-        logError(s"HTTP PUT 请求异常: ${e.getMessage}", e)
-        Map.empty[String, String]
     }
   }
 }
