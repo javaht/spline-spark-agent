@@ -16,272 +16,214 @@
 
 package za.co.absa.spline.harvester.plugin.embedded
 
-import org.apache.spark.sql.execution.datasources.jdbc.{JDBCOptions, JDBCRelation}
 import org.apache.spark.sql.execution.datasources.{LogicalRelation, SaveIntoDataSourceCommand}
 import org.apache.spark.sql.sources.BaseRelation
 import za.co.absa.spline.commons.reflect.ReflectionUtils.extractValue
-import za.co.absa.spline.commons.reflect.extractors.{AccessorMethodValueExtractor, SafeTypeMatchingExtractor}
+import za.co.absa.spline.commons.reflect.extractors.SafeTypeMatchingExtractor
 import za.co.absa.spline.harvester.builder.SourceIdentifier
 import za.co.absa.spline.harvester.plugin.Plugin.{Precedence, ReadNodeInfo, WriteNodeInfo}
 import za.co.absa.spline.harvester.plugin.embedded.DorisPlugin._
 import za.co.absa.spline.harvester.plugin.{BaseRelationProcessing, Plugin, RelationProviderProcessing}
 
+import scala.util.control.NonFatal
+
 import javax.annotation.Priority
-import org.slf4j.LoggerFactory
 
-import scala.util.matching.Regex
-import scala.util.Try
-import scala.util.matching.compat.RegexOps
-
+/**
+ * Plugin for capturing lineage information from Apache Doris data source operations.
+ * 
+ * This plugin handles both read and write operations through Spark's Doris connector,
+ * extracting metadata such as database names, table names, connection parameters,
+ * and write-specific options to build comprehensive lineage information.
+ * 
+ * The plugin supports:
+ * - Read operations from Doris tables via LogicalRelation processing
+ * - Write operations to Doris tables via SaveIntoDataSourceCommand processing
+ * - Graceful handling of missing Doris connector classes
+ * - Standardized source identifier generation in format "doris://database/table"
+ * - Parameter extraction and normalization for connection details
+ * 
+ * @see [[za.co.absa.spline.harvester.plugin.BaseRelationProcessing]]
+ * @see [[za.co.absa.spline.harvester.plugin.RelationProviderProcessing]]
+ */
 @Priority(Precedence.Normal)
 class DorisPlugin
   extends Plugin
-    with RelationProviderProcessing
-    with BaseRelationProcessing {
+    with BaseRelationProcessing
+    with RelationProviderProcessing {
 
-  private val log = LoggerFactory.getLogger(classOf[DorisPlugin])
-
-  // 预编译正则表达式以提高性能
-  private val DorisJdbcUrlPattern = "^jdbc:mysql://.*(?:doris|DORIS).*$".r
-  private val PortPattern = ":(9030|9031|8030|8031)(?:/|$)".r
-  private val VersionPattern = DorisPlugin.DorisVersionPattern
-
+  override def baseRelationProcessor: PartialFunction[(BaseRelation, LogicalRelation), ReadNodeInfo] = {
+    case (`_: DorisRelation`(dorisRelation), _) =>
+      try {
+        // Extract database and table information from Doris relation
+        val database = extractValue[String](dorisRelation, "database")
+        val table = extractValue[String](dorisRelation, "table")
+        
+        // Extract connection parameters
+        val params = extractDorisReadParams(dorisRelation)
+        
+        ReadNodeInfo(asSourceId(database, table), params)
+      } catch {
+        case _: ClassNotFoundException =>
+          // Doris connector classes not available
+          ReadNodeInfo(asSourceId("unknown", "unknown"), Map("error" -> "doris_connector_unavailable"))
+        case _: ReflectiveOperationException =>
+          // Reflection failed, possibly due to version mismatch
+          ReadNodeInfo(asSourceId("unknown", "unknown"), Map("error" -> "reflection_failed"))
+        case NonFatal(_) =>
+          // General fallback for other extraction failures
+          ReadNodeInfo(asSourceId("unknown", "unknown"), Map.empty)
+      }
+  }
 
   override def relationProviderProcessor: PartialFunction[(AnyRef, SaveIntoDataSourceCommand), WriteNodeInfo] = {
     case (rp, cmd) if isDorisProvider(rp) =>
-      val config = try {
-        DorisConfig.fromOptions(cmd.options)
-      } catch {
-        case e: IllegalArgumentException =>
-          log.warn(s"Missing required parameters: ${e.getMessage}, using defaults")
-          DorisConfig.fromOptions(cmd.options + ("fenodes" -> "localhost:8030", "table" -> "unknown_table"))
-      }
-      
-      val enhancedParams = config.toMap ++ Map(
-        "sourceType" -> "doris",
-        "operationType" -> "write",
-        "pluginVersion" -> "1.0.0"
-      )
-
-      WriteNodeInfo(
-        asDorisSourceId(config.fenodes, config.database, config.table),
-        cmd.mode,
-        cmd.query,
-        enhancedParams
-      )
-  }
-
-  override def baseRelationProcessor: PartialFunction[(BaseRelation, LogicalRelation), ReadNodeInfo] = {
-    case (`_: DorisRelation`(relation), _) =>
-      val params = extractValue[Map[String, String]](relation, "parameters")
-      val config = try {
-        DorisConfig.fromOptions(params)
-      } catch {
-        case e: IllegalArgumentException =>
-          log.warn(s"Missing required parameters: ${e.getMessage}, using defaults")
-          DorisConfig.fromOptions(params + ("fenodes" -> "localhost:8030", "table" -> "unknown_table"))
-      }
-      
-      val enhancedParams = config.toMap ++ Map(
-        "sourceType" -> "doris",
-        "operationType" -> "read",
-        "pluginVersion" -> "1.0.0"
-      )
-
-      ReadNodeInfo(
-        asDorisSourceId(config.fenodes, config.database, config.table),
-        enhancedParams
-      )
-
-    case (`_: JDBCRelation`(jr), _) =>
-      val jdbcOptions = extractValue[JDBCOptions](jr, "jdbcOptions")
-      val url = extractValue[String](jdbcOptions, "url")
-      
-      if (isDorisJdbcUrl(url)) {
-        val TableOrQueryFromJDBCOptionsExtractor(table) = jdbcOptions
-        val config = try {
-          DorisConfig.fromJdbcUrl(url, table)
-        } catch {
-          case e: Exception =>
-          log.warn(s"Failed to parse JDBC URL: ${e.getMessage}, using defaults")
-            DorisConfig.fromJdbcUrl(url, table)
-        }
+      try {
+        // Extract database and table from command options
+        val database = cmd.options.getOrElse("database", "default")
+        val table = cmd.options.getOrElse("table", cmd.options.getOrElse("doris.table.identifier", "unknown"))
         
-        val dorisVersion = detectDorisVersion(url)
-        val enhancedParams = config.toMap ++ Map(
-          "sourceType" -> "doris",
-          "connectionType" -> "jdbc"
-        ) ++ dorisVersion.map("dorisVersion" -> _).toMap
-
-        ReadNodeInfo(
-          asDorisSourceId(config.fenodes, config.database, config.table),
-          enhancedParams
+        // Extract write-specific parameters
+        val params = extractDorisWriteParams(cmd.options)
+        
+        WriteNodeInfo(
+          srcId = asSourceId(database, table),
+          saveMode = cmd.mode,
+          logicalPlan = cmd.query,
+          params = params
         )
-      } else {
-        throw new MatchError("Not a Doris JDBC connection")
+      } catch {
+        case _: ClassNotFoundException =>
+          // Doris connector classes not available
+          WriteNodeInfo(
+            srcId = asSourceId("unknown", "unknown"),
+            saveMode = cmd.mode,
+            logicalPlan = cmd.query,
+            params = cmd.options + ("error" -> "doris_connector_unavailable")
+          )
+        case NonFatal(_) =>
+          // General fallback for other extraction failures
+          WriteNodeInfo(
+            srcId = asSourceId("unknown", "unknown"),
+            saveMode = cmd.mode,
+            logicalPlan = cmd.query,
+            params = cmd.options
+          )
       }
-  }
-
-  private def asDorisSourceId(fenodes: String, database: String, table: String): SourceIdentifier = {
-    val cleanFenodes = if (fenodes.trim.isEmpty) "localhost:8030" else fenodes.trim
-    val cleanDatabase = if (database.trim.isEmpty) "default" else database.trim
-    val cleanTable = if (table.trim.isEmpty) "unknown_table" else table.trim
-    
-    // 处理多个FE节点的情况，移除空格并标准化
-    val normalizedFenodes = cleanFenodes.split(",").map(_.trim).filter(_.nonEmpty).mkString(",")
-    
-    SourceIdentifier(
-      Some("doris"), 
-      s"doris://$normalizedFenodes/$cleanDatabase.$cleanTable"
-    )
-  }
-
-  private def isDorisProvider(rp: AnyRef): Boolean = {
-    val rpStr = rp.toString.toLowerCase
-    rpStr == "doris" || 
-    rpStr.contains("org.apache.doris.spark") || 
-    rpStr.contains("doris.spark.sql") ||
-    rpStr.endsWith(".doris")
-  }
-
-  private def isDorisJdbcUrl(url: String): Boolean = {
-    url.startsWith("jdbc:mysql://") && (
-      DorisJdbcUrlPattern.matches(url) ||
-      PortPattern.findFirstIn(url).isDefined
-    )
-  }
-
-  private def detectDorisVersion(url: String): Option[String] = {
-    VersionPattern.findFirstMatchIn(url.toLowerCase)
-      .map(_.group(1))
-      .orElse(extractVersionFromJdbcMetadata(url))
-  }
-
-  private def extractVersionFromJdbcMetadata(url: String): Option[String] = {
-    // 通过JDBC连接获取数据库版本的预留接口
-    None
   }
 }
 
 object DorisPlugin {
-  // 共享正则表达式模式
-  val FenodesPattern = "^([^:]+:\\d+(?:,[^:]+:\\d+)*)$".r
-  val TablePattern = "^(?:(\\w+)\\.)?(\\w+)$".r
-  val DorisVersionPattern = ".*doris.*?(\\d+\\.\\d+\\.\\d+).*$".r
-  
+
+  /**
+   * Type extractor for Doris BaseRelation objects.
+   * Safely matches org.apache.doris.spark.sql.DorisRelation instances.
+   */
   private object `_: DorisRelation` extends SafeTypeMatchingExtractor[AnyRef]("org.apache.doris.spark.sql.DorisRelation")
-  private object `_: JDBCRelation` extends SafeTypeMatchingExtractor[AnyRef]("org.apache.spark.sql.execution.datasources.jdbc.JDBCRelation")
-  
-  private object TableOrQueryFromJDBCOptionsExtractor extends AccessorMethodValueExtractor[String]("table", "tableOrQuery")
 
-  case class DorisConfig(
-    fenodes: String,
-    database: String,
-    table: String,
-    user: Option[String] = None,
-    password: Option[String] = None,
-    additionalParams: Map[String, String] = Map.empty,
-    queryTimeout: Option[String] = None,
-    connectionPoolSize: Option[String] = None
-  ) {
-    def toMap: Map[String, String] = {
-      Map(
-        "fenodes" -> fenodes,
-        "database" -> database,
-        "table" -> table
-      ) ++ 
-      user.map("user" -> _).toMap ++
-      password.map("password" -> _).toMap ++
-      queryTimeout.map("queryTimeout" -> _).toMap ++
-      connectionPoolSize.map("connectionPoolSize" -> _).toMap ++
-      additionalParams
-    }
-  }
+  /**
+   * Type extractor for Doris data source provider.
+   * Matches the DefaultSource class from Doris Spark connector.
+   */
+  private object DorisDataSourceExtractor extends SafeTypeMatchingExtractor[AnyRef]("org.apache.doris.spark.sql.DefaultSource")
 
-  object DorisConfig {
-    // 已在主类中预编译
-
-    def fromOptions(options: Map[String, String]): DorisConfig = {
-      val fenodes = options.get("fenodes")
-        .orElse(options.get("doris.fenodes"))
-        .orElse(options.get("doris.host"))
-        .getOrElse(throw new IllegalArgumentException("Missing required parameter: fenodes"))
-
-      val database = options.getOrElse("database", 
-        options.getOrElse("doris.database", ""))
+  /**
+   * Extracts connection parameters from Doris relation for read operations.
+   * 
+   * @param dorisRelation the Doris relation object
+   * @return Map of connection parameters
+   */
+  private def extractDorisReadParams(dorisRelation: AnyRef): Map[String, Any] = {
+    try {
+      val params = scala.collection.mutable.Map[String, Any]()
       
-      val table = options.get("table")
-        .orElse(options.get("dbtable"))
-        .orElse(options.get("doris.table.identifier"))
-        .orElse(options.get("doris.table"))
-        .getOrElse(throw new IllegalArgumentException("Missing required parameter: table"))
-
-      val user = options.get("doris.user").orElse(options.get("user"))
-      val password = options.get("doris.password").orElse(options.get("password"))
-      val queryTimeout = options.get("doris.query.timeout")
-      val connectionPoolSize = options.get("doris.connection.pool.size")
-
-      val additionalParams = options.filterKeys(key => 
-        key.startsWith("doris.") && !Set("doris.fenodes", "doris.table.identifier", "doris.table", "doris.user", "doris.password", "doris.database", "doris.host").contains(key)
-      )
-
-      DorisConfig(fenodes, database, table, user, password, additionalParams, queryTimeout, connectionPoolSize)
-    }
-
-    def fromJdbcUrl(url: String, tableName: String): DorisConfig = {
-      val endpoint = extractDorisEndpoints(url)
-      val (database, table) = parseTableName(tableName)
+      // Try to extract common Doris connection parameters
+      try {
+        val fenodes = extractValue[String](dorisRelation, "fenodes")
+        params += "connection.hosts" -> fenodes
+      } catch { case _: Exception => }
       
-      val user = extractUserFromUrl(url)
-      val password = extractPasswordFromUrl(url)
-
-      DorisConfig(endpoint, database, table, user, password)
-    }
-
-    private def extractDorisEndpoints(url: String): String = {
-      val pattern = "jdbc:mysql://([^/]+)/.*".r
-      url match {
-        case pattern(endpoint) => endpoint
-        case _ => {
-          log.warn(s"Failed to extract Doris endpoints from URL: $url, using default")
-          "localhost:9030"
-        }
-      }
-    }
-
-    private def parseTableName(fullTableName: String): (String, String) = {
-      fullTableName match {
-        case TablePattern(db, tbl) => (db, tbl)
-        case _ => ("", fullTableName)
-      }
-    }
-
-    private def extractUserFromUrl(url: String): Option[String] = {
-      val pattern = """jdbc:mysql://([^:]+):[^@]*@""".r
-      url match {
-        case pattern(user) => Some(user)
-        case _ => None
-      }
-    }
-
-    private def extractPasswordFromUrl(url: String): Option[String] = {
-    val pattern = """jdbc:mysql://[^:]*:([^@]+)@""".r
-    url match {
-      case pattern(password) => Some(maskPassword(password))
-      case _ => None
+      try {
+        val user = extractValue[String](dorisRelation, "user")
+        params += "auth.username" -> user
+      } catch { case _: Exception => }
+      
+      try {
+        val tableIdentifier = extractValue[String](dorisRelation, "tableIdentifier")
+        params += "table.identifier" -> tableIdentifier
+      } catch { case _: Exception => }
+      
+      params.toMap
+    } catch {
+      case _: Exception => Map.empty
     }
   }
 
-  private def maskPassword(password: String): String = {
-    if (password.length <= 2) "*" * password.length
-    else password.head + "*" * (password.length - 2) + password.last
-  }
+  /**
+   * Extracts connection parameters from Doris write command options.
+   * 
+   * @param options the command options map
+   * @return Map of standardized connection parameters
+   */
+  private def extractDorisWriteParams(options: Map[String, String]): Map[String, Any] = {
+    val params = scala.collection.mutable.Map[String, Any]()
     
-    private def detectDorisVersion(url: String): Option[String] = {
-      url match {
-        case DorisPlugin.DorisVersionPattern(version) => Some(version)
-        case _ => None
-      }
+    // Map Doris-specific options to standardized parameter names
+    options.get("fenodes").foreach(params += "connection.hosts" -> _)
+    options.get("user").foreach(params += "auth.username" -> _)
+    options.get("password").foreach(params += "auth.password" -> _)
+    options.get("doris.table.identifier").foreach(params += "table.identifier" -> _)
+    options.get("doris.write.fields").foreach(params += "write.fields" -> _)
+    options.get("doris.batch.size").foreach(params += "batch.size" -> _)
+    options.get("doris.exec.mem.limit").foreach(params += "memory.limit" -> _)
+    
+    // Include any additional Doris-specific options
+    options.filter(_._1.startsWith("doris.")).foreach { case (key, value) =>
+      params += key -> value
+    }
+    
+    params.toMap
+  }
+
+  /**
+   * Validates and normalizes database and table names for Doris.
+   * 
+   * @param database the raw database name
+   * @param table the raw table name
+   * @return tuple of (normalized_database, normalized_table)
+   */
+  private def normalizeDorisIdentifiers(database: String, table: String): (String, String) = {
+    val normalizedDb = Option(database).filter(_.nonEmpty).getOrElse("default")
+    val normalizedTable = Option(table).filter(_.nonEmpty).getOrElse("unknown")
+    (normalizedDb, normalizedTable)
+  }
+
+  /**
+   * Generates a standardized source identifier for Doris tables.
+   * 
+   * @param database the Doris database name
+   * @param table the Doris table name
+   * @return SourceIdentifier with format "doris://database/table"
+   */
+  private def asSourceId(database: String, table: String): SourceIdentifier = {
+    val (normalizedDb, normalizedTable) = normalizeDorisIdentifiers(database, table)
+    SourceIdentifier(Some("doris"), s"doris://$normalizedDb/$normalizedTable")
+  }
+
+  /**
+   * Checks if the given relation provider is a Doris data source.
+   * 
+   * @param provider the relation provider to check
+   * @return true if it's a Doris provider
+   */
+  private def isDorisProvider(provider: AnyRef): Boolean = {
+    provider match {
+      case "doris" => true
+      case "org.apache.doris.spark.sql.DefaultSource" => true
+      case DorisDataSourceExtractor(_) => true
+      case _ => 
+        // Additional check for class name string matching
+        provider.toString.contains("doris") && provider.toString.contains("DefaultSource")
     }
   }
 }
