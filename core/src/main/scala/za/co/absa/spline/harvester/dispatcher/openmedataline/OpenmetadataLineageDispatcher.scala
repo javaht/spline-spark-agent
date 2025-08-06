@@ -26,7 +26,9 @@ import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
 import okhttp3.{OkHttpClient, Request, Response, MediaType, RequestBody}
 
-class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherConfig) extends AbstractJsonLineageDispatcher with Logging {
+class OpenmetadataLineageDispatcher(
+
+  val config: OpenmetadataLineageDispatcherConfig) extends AbstractJsonLineageDispatcher with Logging {
 
   def this(configuration: Configuration) = this(new OpenmetadataLineageDispatcherConfig(configuration))
 
