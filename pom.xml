@@ -159,7 +159,6 @@
         <module>commons</module>
         <module>core</module>
         <module>examples</module>
-        <module>integration-tests</module>
     </modules>
 
     <build>

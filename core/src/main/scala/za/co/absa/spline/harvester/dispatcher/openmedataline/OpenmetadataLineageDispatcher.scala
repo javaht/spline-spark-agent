@@ -13,9 +13,9 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * 
  */
 package za.co.absa.spline.harvester.dispatcher.openmedataline
+
 import org.apache.commons.configuration.Configuration
 import org.apache.commons.lang.StringUtils
 import org.apache.spark.internal.Logging
@@ -24,6 +24,7 @@ import com.alibaba.fastjson2.{JSON, JSONObject}
 import za.co.absa.spline.harvester.dispatcher.AbstractJsonLineageDispatcher
 import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
+import okhttp3.{OkHttpClient, Request, Response, MediaType, RequestBody}
 
 class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherConfig) extends AbstractJsonLineageDispatcher with Logging {
 
@@ -80,6 +81,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
         (mutable.LinkedHashSet.empty, ("", "", ""))
     }
   }
+
   def makeLineage(sourceset: mutable.LinkedHashSet[(String,String,String)], targeTuple: (String,String,String)): Unit = {
     //由于不支持一个json多个血缘,所以要单独拼接
     val targetTable = targeTuple._1
@@ -122,6 +124,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
       handleHttpPut(stringlineage)
     }
   }
+
   private def getStringValue(json: JSONObject, path: String): String = {
     try {
       val keys = path.split("\\.")
@@ -140,16 +143,13 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
   }
 
   def getMetadataTables(serviceType: String, database: String, tableName: String): (String, String, String) = {
-
     val databaseSchema = serviceType match {
       case "hive" => s"${config.servicename}.default.$database"
       case _ => s"$serviceType.$database"
     }
-
     val cacheKey = s"$databaseSchema.$tableName"
-    
     tableCache.getOrElseUpdate(cacheKey, {
-      val url = s"${config.apiUrl}/api/v1/tables?databaseSchema=$databaseSchema"
+      val url = s"${config.apiUrl}/api/v1/tables/name/$cacheKey"
       val tableMap = handleHttpGet(url)
       tableMap
     }).get(tableName) match {
@@ -159,63 +159,65 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
     }
   }
 
+  private val client = new OkHttpClient.Builder()
+    .connectTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+    .readTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+    .build()
+
   def handleHttpGet(url: String): Map[String, Map[String, String]] = {
+    var response: Response = null
     try {
-      val connection = new java.net.URL(url).openConnection().asInstanceOf[java.net.HttpURLConnection]
-      connection.setRequestMethod("GET")
-      connection.setRequestProperty("Content-Type", CONTENT_TYPE_JSON)
-      connection.setRequestProperty("Authorization", s"Bearer ${config.token}")
-      connection.setConnectTimeout(HTTP_TIMEOUT_SECONDS * 1000)
-      connection.setReadTimeout(HTTP_TIMEOUT_SECONDS * 1000)
+      val request = new Request.Builder()
+        .url(url)
+        .addHeader("Content-Type", CONTENT_TYPE_JSON)
+        .addHeader("Authorization", s"Bearer ${config.token}")
+        .build()
 
-      val responseCode = connection.getResponseCode
-      val responseBody = if (responseCode >= 200 && responseCode < 300) {
-        scala.io.Source.fromInputStream(connection.getInputStream).mkString
-      } else {
-        scala.io.Source.fromInputStream(connection.getErrorStream).mkString
-      }
-
+      response = client.newCall(request).execute()
+      val responseCode = response.code()
+      val responseBody = response.body().string()
       if (responseCode >= 200 && responseCode < 300) {
-        val dataArray = JSON.parseObject(responseBody).getJSONArray("data")
-        dataArray.asScala.map { obj =>
-          val jsonObj = obj.asInstanceOf[JSONObject]
-          jsonObj.getString("name") -> Map(
-            "id" -> jsonObj.getString("id"),
-            "fullyQualifiedName" -> jsonObj.getString("fullyQualifiedName")
-          )
-        }.toMap
+        val jsonResponse = JSON.parseObject(responseBody)
+        val mainId = jsonResponse.getString("id")
+        val mainFullyQualifiedName = jsonResponse.getString("fullyQualifiedName")
+        val mainMap = Map("id" -> mainId, "fullyQualifiedName" -> mainFullyQualifiedName)
+        val mainName = jsonResponse.getString("name")
+        val result = Map(mainName -> mainMap)
+        result
       } else {
-        logError(s"HTTP GET 请求失败: $responseCode, URL: $url, 响应: $responseBody")
+        println("Response code not in success range")
         Map.empty[String, Map[String, String]]
       }
     } catch {
       case e: Exception =>
-        logError(s"HTTP GET 请求异常: ${e.getMessage}", e)
+        println(s"Exception in handleHttpGet: ${e.getMessage}")
+        e.printStackTrace()
         Map.empty[String, Map[String, String]]
+    } finally {
+      if (response != null) {
+        response.close()
+      }
     }
   }
 
   def handleHttpPut(jsonParam: String): Map[String, String] = {
+    var response: Response = null
     val lineageUrl = s"${config.apiUrl}/api/v1/lineage"
-
+  
     try {
-      val connection = new java.net.URL(lineageUrl).openConnection().asInstanceOf[java.net.HttpURLConnection]
-      connection.setRequestMethod("PUT")
-      connection.setRequestProperty("Content-Type", CONTENT_TYPE_JSON)
-      connection.setRequestProperty("Authorization", s"Bearer ${config.token}")
-      connection.setConnectTimeout(HTTP_TIMEOUT_SECONDS * 1000)
-      connection.setReadTimeout(HTTP_TIMEOUT_SECONDS * 1000)
-      connection.setDoOutput(true)
-      val outputStream = connection.getOutputStream
-      outputStream.write(jsonParam.getBytes("UTF-8"))
-      outputStream.close()
-      val responseCode = connection.getResponseCode
-      val responseBody = if (responseCode >= 200 && responseCode < 300) {
-        scala.io.Source.fromInputStream(connection.getInputStream).mkString
-      } else {
-        scala.io.Source.fromInputStream(connection.getErrorStream).mkString
-      }
-
+      val mediaType = MediaType.parse(CONTENT_TYPE_JSON)
+      val body = RequestBody.create(mediaType, jsonParam)
+      val request = new Request.Builder()
+        .url(lineageUrl)
+        .put(body)
+        .addHeader("Content-Type", CONTENT_TYPE_JSON)
+        .addHeader("Authorization", s"Bearer ${config.token}")
+        .build()
+  
+      response = client.newCall(request).execute()
+      val responseCode = response.code()
+      val responseBody = response.body().string()
+  
       if (responseBody != null && responseBody.nonEmpty) {
         try {
           val dataArray = JSON.parseObject(responseBody).getJSONArray("data")
@@ -231,6 +233,15 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
       } else {
         println("发送成功 无返回值")
         Map.empty[String, String]
+      }
+    } catch {
+      case e: Exception =>
+        logError(s"HTTP PUT 请求异常: ${e.getMessage}", e)
+        Map.empty[String, String]
+    } finally {
+      // 确保响应体被关闭
+      if (response != null) {
+        response.close()
       }
     }
   }
