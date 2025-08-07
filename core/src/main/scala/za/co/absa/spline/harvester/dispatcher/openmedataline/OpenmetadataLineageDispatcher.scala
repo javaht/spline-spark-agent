@@ -147,6 +147,7 @@ class OpenmetadataLineageDispatcher(
   def getMetadataTables(serviceType: String, database: String, tableName: String): (String, String, String) = {
     val databaseSchema = serviceType match {
       case "hive" => s"${config.servicename}.default.$database"
+      case "doris" => s"${config.servicename}.default.$database"
       case _ => s"$serviceType.$database"
     }
     val cacheKey = s"$databaseSchema.$tableName"
