@@ -313,6 +313,9 @@ spline:
     za.co.absa.spline.harvester.plugin.embedded.ElasticSearchPlugin:
       enabled: true
 
+    za.co.absa.spline.harvester.plugin.embedded.DorisPlugin:
+      enabled: true
+
     za.co.absa.spline.harvester.plugin.embedded.NonPersistentActionsCapturePlugin:
       enabled: false
       funcNames:

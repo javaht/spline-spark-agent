@@ -53,6 +53,10 @@ class OpenmetadataLineageDispatcher(
 
   def getLineage(jsonData: String): (mutable.LinkedHashSet[(String, String, String)], (String, String, String)) = {
     try {
+      logInfo(s"开始解析血缘数据，数据长度: ${jsonData.length}")
+      logInfo(s"血缘数据: ${jsonData}")
+      logDebug(s"原始血缘数据: $jsonData")
+      
       val operations = JSON.parseObject(jsonData).getJSONObject("operations")
       val readsArray = operations.getJSONArray("reads")
       val write = operations.getJSONObject("write")
@@ -60,6 +64,19 @@ class OpenmetadataLineageDispatcher(
       val targetType = getStringValue(write, "extra.destinationType")
       val targetDatabase = getStringValue(write, "params.table.identifier.database")
       val targetTableName = getStringValue(write, "params.table.identifier.table")
+
+      logInfo(s"目标信息 - 类型: '$targetType', 数据库: '$targetDatabase', 表: '$targetTableName'")
+      
+      // 验证目标信息
+      if (targetType.isEmpty) {
+        logWarning("目标类型为空，检查 extra.destinationType 字段")
+      }
+      if (targetDatabase.isEmpty) {
+        logWarning("目标数据库为空，检查 params.table.identifier.database 字段")
+      }
+      if (targetTableName.isEmpty) {
+        logWarning("目标表名为空，检查 params.table.identifier.table 字段")
+      }
 
       val sourceset = mutable.LinkedHashSet[(String, String, String)]()
       
@@ -69,17 +86,47 @@ class OpenmetadataLineageDispatcher(
         val sourceTable = getStringValue(readObj, "params.table.identifier.table")
         val sourceDatabase = getStringValue(readObj, "params.table.identifier.database")
         
+        logInfo(s"源${i+1}信息 - 类型: '$sourceType', 数据库: '$sourceDatabase', 表: '$sourceTable'")
+        
+        // 验证源信息
+        if (sourceType.isEmpty) {
+          logWarning(s"源${i+1}类型为空，检查 extra.sourceType 字段")
+        }
+        if (sourceDatabase.isEmpty) {
+          logWarning(s"源${i+1}数据库为空，检查 params.table.identifier.database 字段")
+        }
+        if (sourceTable.isEmpty) {
+          logWarning(s"源${i+1}表名为空，检查 params.table.identifier.table 字段")
+        }
+        
         if (sourceTable.nonEmpty && sourceDatabase.nonEmpty) {
           val sourceTuple = getMetadataTables(sourceType, sourceDatabase, sourceTable)
-          sourceset.add(sourceTuple)
+          if (sourceTuple._1.nonEmpty) {
+            sourceset.add(sourceTuple)
+            logDebug(s"成功添加源表: $sourceTuple")
+          } else {
+            logWarning(s"无法获取源表元数据: $sourceType.$sourceDatabase.$sourceTable")
+          }
+        } else {
+          logWarning(s"跳过源${i+1}，因为表名或数据库名为空")
         }
       }
       
       val targetTuple = getMetadataTables(targetType, targetDatabase, targetTableName)
+      if (targetTuple._1.nonEmpty) {
+        logDebug(s"成功获取目标表元数据: $targetTuple")
+      } else {
+        logWarning(s"无法获取目标表元数据: $targetType.$targetDatabase.$targetTableName")
+      }
+      
+      logInfo(s"血缘解析完成 - 源表数量: ${sourceset.size}, 目标表: ${if (targetTuple._1.nonEmpty) "有效" else "无效"}")
+      
       (sourceset, targetTuple)
     } catch {
       case e: Exception =>
         logError(s"解析血缘数据失败: ${e.getMessage}")
+        logError(s"失败的JSON数据: $jsonData")
+        e.printStackTrace()
         (mutable.LinkedHashSet.empty, ("", "", ""))
     }
   }
@@ -132,32 +179,84 @@ class OpenmetadataLineageDispatcher(
       val keys = path.split("\\.")
       val lastIndex = keys.length - 1
       val parentObj = keys.dropRight(1).foldLeft(json) { (obj, key) =>
-        if (obj != null && obj.containsKey(key)) obj.getJSONObject(key) else null
+        if (obj != null && obj.containsKey(key)) {
+          obj.getJSONObject(key)
+        } else {
+          logDebug(s"路径 '$path' 中的键 '$key' 不存在或为null")
+          null
+        }
       }
       if (parentObj != null && parentObj.containsKey(keys(lastIndex))) {
-        parentObj.getString(keys(lastIndex))
+        val value = parentObj.getString(keys(lastIndex))
+        logDebug(s"成功提取路径 '$path' 的值: '$value'")
+        value
       } else {
+        logDebug(s"路径 '$path' 的最终键 '${keys(lastIndex)}' 不存在")
         ""
       }
     } catch {
-      case _: Exception => ""
+      case e: Exception => 
+        logWarning(s"提取路径 '$path' 的值时发生异常: ${e.getMessage}")
+        ""
     }
   }
 
   def getMetadataTables(serviceType: String, database: String, tableName: String): (String, String, String) = {
-    val databaseSchema = serviceType match {
-      case "hive" => s"${config.servicename}.default.$database"
-      case "doris" => s"${config.servicename}.default.$database"
-      case _ => s"$serviceType.$database"
+    // 验证输入参数
+    if (serviceType.isEmpty) {
+      logWarning("服务类型为空，无法构建数据库schema")
+      return ("", "", "")
     }
+    if (database.isEmpty) {
+      logWarning("数据库名为空，无法构建数据库schema")
+      return ("", "", "")
+    }
+    if (tableName.isEmpty) {
+      logWarning("表名为空，无法查询表信息")
+      return ("", "", "")
+    }
+    
+    val databaseSchema = serviceType match {
+      case "hive" => 
+        logDebug(s"使用Hive服务名: ${config.hive_servicename}")
+        s"${config.hive_servicename}.default.$database"
+      case "doris" => 
+        logDebug(s"使用Doris服务名: ${config.doris_servicename}")
+        s"${config.doris_servicename}.default.$database"
+      case _ => 
+        logWarning(s"未知的服务类型: $serviceType，使用默认格式")
+        s"$serviceType.$database"
+    }
+    
     val cacheKey = s"$databaseSchema.$tableName"
-    tableCache.getOrElseUpdate(cacheKey, {
-      val url = s"${config.apiUrl}/api/v1/tables/name/$cacheKey"
-      val tableMap = handleHttpGet(url)
-      tableMap
-    }).get(tableName) match {
-      case Some(info) => (tableName, info("id"), info("fullyQualifiedName"))
-      case None => logWarning(s"在 $databaseSchema 中未找到表: $tableName")
+    logInfo(s"查询表元数据 - 服务类型: $serviceType, 缓存键: $cacheKey")
+    
+    try {
+      tableCache.getOrElseUpdate(cacheKey, {
+        val url = s"${config.apiUrl}/api/v1/tables/name/$cacheKey"
+        logDebug(s"调用OpenMetadata API: $url")
+        val tableMap = handleHttpGet(url)
+        if (tableMap.nonEmpty) {
+          logDebug(s"成功获取表信息: ${tableMap.keys.mkString(", ")}")
+        } else {
+          logWarning(s"API返回空结果: $url")
+        }
+        tableMap
+      }).get(tableName) match {
+        case Some(info) => 
+          val result = (tableName, info("id"), info("fullyQualifiedName"))
+          logInfo(s"成功获取表元数据: $result")
+          result
+        case None =>
+          logWarning(s"在 $databaseSchema 中未找到表: $tableName")
+          logDebug(s"缓存中的表列表: ${tableCache.get(cacheKey).map(_.keys.mkString(", ")).getOrElse("无")}")
+          ("", "", "")
+      }
+    } catch {
+      case e: Exception =>
+        logError(s"获取表元数据时发生异常: ${e.getMessage}")
+        logError(s"服务类型: $serviceType, 数据库: $database, 表名: $tableName")
+        e.printStackTrace()
         ("", "", "")
     }
   }
