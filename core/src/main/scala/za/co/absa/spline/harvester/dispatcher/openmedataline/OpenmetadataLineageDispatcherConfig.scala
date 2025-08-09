@@ -19,14 +19,14 @@ package za.co.absa.spline.harvester.dispatcher.openmedataline
 
 import org.apache.commons.configuration.Configuration
 import za.co.absa.spline.commons.config.ConfigurationImplicits._
-import za.co.absa.spline.harvester.dispatcher.openmedataline.OpenmetadataLineageDispatcherConfig.{ApiUrlProperty, ServiceName, Token}
-
-import scala.concurrent.duration._
+import za.co.absa.spline.harvester.dispatcher.openmedataline.OpenmetadataLineageDispatcherConfig.{ApiUrlProperty, DorisServiceName, HiveServiceName, Token}
 
 object OpenmetadataLineageDispatcherConfig {
   val ApiUrlProperty = "api.url"
   val Token = "token"
-  val ServiceName = "service.name"
+  val HiveServiceName = "hive.service.name"
+  val DorisServiceName = "doris.service.name"
+
 
   def apply(c: Configuration) = new OpenmetadataLineageDispatcherConfig(c)
 }
@@ -34,5 +34,6 @@ object OpenmetadataLineageDispatcherConfig {
 class OpenmetadataLineageDispatcherConfig(config: Configuration) {
   val apiUrl: String = config.getRequiredString(ApiUrlProperty)
   val token: String = config.getRequiredString(Token)
-  val servicename: String = config.getRequiredString(ServiceName)
+  val hive_servicename: String = config.getRequiredString(HiveServiceName)
+  val doris_servicename: String = config.getRequiredString(DorisServiceName)
 }
