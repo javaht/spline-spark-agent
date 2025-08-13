@@ -19,21 +19,39 @@ package za.co.absa.spline.harvester.dispatcher.openmedataline
 
 import org.apache.commons.configuration.Configuration
 import za.co.absa.spline.commons.config.ConfigurationImplicits._
-import za.co.absa.spline.harvester.dispatcher.openmedataline.OpenmetadataLineageDispatcherConfig.{ApiUrlProperty, DorisServiceName, HiveServiceName, Token}
+import za.co.absa.spline.harvester.dispatcher.openmedataline.OpenmetadataLineageDispatcherConfig.{database_ServiceNames, host_Port, jwt_Token, pipeline_Description, pipeline_Name, pipeline_ServiceName, pipeline_SourceUrl, service_Names}
 
 object OpenmetadataLineageDispatcherConfig {
-  val ApiUrlProperty = "api.url"
-  val Token = "token"
-  val HiveServiceName = "hive.service.name"
-  val DorisServiceName = "doris.service.name"
+  val host_Port = "hostPort"
+  val jwt_Token = "jwtToken"
+  val service_Names = "serviceNames"
+  val pipeline_Name = "pipelineName"
+
+  val pipeline_SourceUrl="pipelineSourceUrl"
+  val pipeline_ServiceName="pipelineServiceName"
+  val database_ServiceNames="databaseServiceNames"
+  val pipeline_Description="pipelineDescription"
 
 
   def apply(c: Configuration) = new OpenmetadataLineageDispatcherConfig(c)
 }
 
 class OpenmetadataLineageDispatcherConfig(config: Configuration) {
-  val apiUrl: String = config.getRequiredString(ApiUrlProperty)
-  val token: String = config.getRequiredString(Token)
-  val hive_servicename: String = config.getRequiredString(HiveServiceName)
-  val doris_servicename: String = config.getRequiredString(DorisServiceName)
+
+  val hostPort: String = config.getRequiredString(host_Port)
+  var jwtToken: String = getJwtToken(jwt_Token)
+  val serviceNames: String = config.getRequiredString(service_Names)
+  val pipelineName: String = config.getRequiredString(pipeline_Name)
+
+  val pipelineSourceUrl: String = config.getRequiredString(pipeline_SourceUrl)
+  val pipelineServiceName: String = config.getRequiredString(pipeline_ServiceName)
+  val databaseServiceNames: String = config.getRequiredString(database_ServiceNames)
+  val pipelineDescription: String = config.getRequiredString(pipeline_Description)
+
+
+  def getJwtToken(jwtToken: String): String = {
+    String.format("Bearer %s", jwtToken)
+  }
+
+
 }

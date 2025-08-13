@@ -15,29 +15,98 @@
  * limitations under the License.
  */
 package za.co.absa.spline.harvester.dispatcher.openmedataline
-
 import org.apache.commons.configuration.Configuration
 import org.apache.commons.lang.StringUtils
 import org.apache.spark.internal.Logging
+import okhttp3._
+import scala.util.{Try, Success, Failure}
 import scala.collection.mutable
 import com.alibaba.fastjson2.{JSON, JSONObject}
 import za.co.absa.spline.harvester.dispatcher.AbstractJsonLineageDispatcher
 import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
-import okhttp3.{OkHttpClient, Request, Response, MediaType, RequestBody}
+import java.util
 
 class OpenmetadataLineageDispatcher(
 
   val config: OpenmetadataLineageDispatcherConfig) extends AbstractJsonLineageDispatcher with Logging {
 
-  def this(configuration: Configuration) = this(new OpenmetadataLineageDispatcherConfig(configuration))
+  def this(configuration: Configuration) = this(
+    new OpenmetadataLineageDispatcherConfig(configuration)
+  )
 
   // 常量定义
+  private val SPARK_LINEAGE_SOURCE: String = "SparkLineage"
+  private val TABLE_SEARCH_INDEX: String = "table_search_index"
+  private val CONTAINER_SEARCH_INDEX: String = "container_search_index"
+  private val PIPELINE_SOURCE_TYPE: String = "Spark"
+
   private val HTTP_TIMEOUT_SECONDS = 30
   private val CONTENT_TYPE_JSON = "application/json"
   private val tableCache = mutable.Map[String, Map[String, Map[String, String]]]()
-
+  private var databasenames: List[String] = List.empty[String]
   override def name = "Openmetadata"
+
+  if (config.databaseServiceNames != null) {
+    try {
+      databasenames=config.databaseServiceNames.split(",").toList
+    } catch {
+      case e: Exception =>
+        log.error("failed to emit fetch database service names: {}", e.getMessage, e)
+        List.empty[String]
+    }
+  } else {
+    databasenames= List.empty[String]
+  }
+  createPipelineServiceRequest()
+
+
+
+
+
+
+
+
+  def createPipelineServiceRequest(): Option[Request] = {
+    Try {
+      val requestMap = new util.HashMap[String, AnyRef]
+      requestMap.put("name", config.pipelineServiceName)
+      requestMap.put("serviceType", PIPELINE_SOURCE_TYPE)
+      val connectionConfig = new util.HashMap[String, AnyRef]
+      val connectionType = new util.HashMap[String, AnyRef]
+      connectionType.put("type", PIPELINE_SOURCE_TYPE)
+      connectionConfig.put("config", connectionType)
+      requestMap.put("connection", connectionConfig)
+      val jsonRequest = toJsonString(requestMap)
+      createPutRequest("/api/v1/services/pipelineServices", jsonRequest)
+
+    } match {
+      case Success(Some(request)) => Some(request)
+      case Success(None) => None
+      case Failure(exception) =>
+        log.error(s"Failed to create pipeline service request: ${exception.getMessage}")
+        exception.printStackTrace()
+        None
+    }
+  }
+
+  def toJsonString(obj: AnyRef): String = JSON.toJSONString(obj)
+
+  def createPutRequest(path: String, jsonRequest: String): Option[Request] = {
+    Try {
+      val body = RequestBody.create(jsonRequest, MediaType.parse("application/json; charset=utf-8"))
+      val fullUrl = s"${config.hostPort}$path"
+      new Request.Builder().url(fullUrl).put(body).addHeader("Content-Type", "application/json").build()
+    } match {
+      case Success(request) => Some(request)
+      case Failure(exception) =>
+        log.error(s"Failed to create PUT request due to ${exception.getMessage}")
+        exception.printStackTrace()
+        None
+    }
+  }
+
+
 
   override protected def send(data: String): Unit = {
     if (data.startsWith("ExecutionPlan")) {
@@ -56,7 +125,7 @@ class OpenmetadataLineageDispatcher(
       logInfo(s"开始解析血缘数据，数据长度: ${jsonData.length}")
       logInfo(s"血缘数据: ${jsonData}")
       logDebug(s"原始血缘数据: $jsonData")
-      
+
       val operations = JSON.parseObject(jsonData).getJSONObject("operations")
       val readsArray = operations.getJSONArray("reads")
       val write = operations.getJSONObject("write")
@@ -66,69 +135,7 @@ class OpenmetadataLineageDispatcher(
       val targetTableName = getStringValue(write, "params.table.identifier.table")
 
       logInfo(s"目标信息 - 类型: '$targetType', 数据库: '$targetDatabase', 表: '$targetTableName'")
-      
-      // 验证目标信息
-      if (targetType.isEmpty) {
-        logWarning("目标类型为空，检查 extra.destinationType 字段")
-      }
-      if (targetDatabase.isEmpty) {
-        logWarning("目标数据库为空，检查 params.table.identifier.database 字段")
-      }
-      if (targetTableName.isEmpty) {
-        logWarning("目标表名为空，检查 params.table.identifier.table 字段")
-      }
 
-      val sourceset = mutable.LinkedHashSet[(String, String, String)]()
-      
-      for (i <- 0 until readsArray.size()) {
-        val readObj = readsArray.getJSONObject(i)
-        val sourceType = getStringValue(readObj, "extra.sourceType")
-        val sourceTable = getStringValue(readObj, "params.table.identifier.table")
-        val sourceDatabase = getStringValue(readObj, "params.table.identifier.database")
-        
-        logInfo(s"源${i+1}信息 - 类型: '$sourceType', 数据库: '$sourceDatabase', 表: '$sourceTable'")
-        
-        // 验证源信息
-        if (sourceType.isEmpty) {
-          logWarning(s"源${i+1}类型为空，检查 extra.sourceType 字段")
-        }
-        if (sourceDatabase.isEmpty) {
-          logWarning(s"源${i+1}数据库为空，检查 params.table.identifier.database 字段")
-        }
-        if (sourceTable.isEmpty) {
-          logWarning(s"源${i+1}表名为空，检查 params.table.identifier.table 字段")
-        }
-        
-        if (sourceTable.nonEmpty && sourceDatabase.nonEmpty) {
-          val sourceTuple = getMetadataTables(sourceType, sourceDatabase, sourceTable)
-          if (sourceTuple._1.nonEmpty) {
-            sourceset.add(sourceTuple)
-            logDebug(s"成功添加源表: $sourceTuple")
-          } else {
-            logWarning(s"无法获取源表元数据: $sourceType.$sourceDatabase.$sourceTable")
-          }
-        } else {
-          logWarning(s"跳过源${i+1}，因为表名或数据库名为空")
-        }
-      }
-      
-      val targetTuple = getMetadataTables(targetType, targetDatabase, targetTableName)
-      if (targetTuple._1.nonEmpty) {
-        logDebug(s"成功获取目标表元数据: $targetTuple")
-      } else {
-        logWarning(s"无法获取目标表元数据: $targetType.$targetDatabase.$targetTableName")
-      }
-      
-      logInfo(s"血缘解析完成 - 源表数量: ${sourceset.size}, 目标表: ${if (targetTuple._1.nonEmpty) "有效" else "无效"}")
-      
-      (sourceset, targetTuple)
-    } catch {
-      case e: Exception =>
-        logError(s"解析血缘数据失败: ${e.getMessage}")
-        logError(s"失败的JSON数据: $jsonData")
-        e.printStackTrace()
-        (mutable.LinkedHashSet.empty, ("", "", ""))
-    }
   }
 
   def makeLineage(sourceset: mutable.LinkedHashSet[(String,String,String)], targeTuple: (String,String,String)): Unit = {
@@ -152,7 +159,7 @@ class OpenmetadataLineageDispatcher(
            |                "deleted": false,
            |                "description": "a entity",
            |                "displayName": "$sourceTable",
-           |                "href": "${config.apiUrl}/api//v1/tables/$sourceId",
+           |                "href": "${config.hostPort}/api//v1/tables/$sourceId",
            |                "inherited": true,
            |                "type": "table"
            |            },
@@ -163,14 +170,13 @@ class OpenmetadataLineageDispatcher(
            |            "deleted": false,
            |            "description": "a entity",
            |            "displayName": "$targetTable",
-           |            "href": "${config.apiUrl}/api//v1/tables/$targetId",
+           |            "href": "${config.hostPort}/api//v1/tables/$targetId",
            |            "inherited": true,
            |            "type": "table"
            |        }
            |    }
            |}
            |""".stripMargin
-      handleHttpPut(stringlineage)
     }
   }
 
@@ -218,11 +224,11 @@ class OpenmetadataLineageDispatcher(
     
     val databaseSchema = serviceType match {
       case "hive" => 
-        logDebug(s"使用Hive服务名: ${config.hive_servicename}")
-        s"${config.hive_servicename}.default.$database"
+        logDebug(s"使用Hive服务名: ${config.databaseServiceNames}")
+        s"${config.databaseServiceNames}.default.$database"
       case "doris" => 
-        logDebug(s"使用Doris服务名: ${config.doris_servicename}")
-        s"${config.doris_servicename}.default.$database"
+        logDebug(s"使用Doris服务名: ${config.databaseServiceNames}")
+        s"${config.databaseServiceNames}.default.$database"
       case _ => 
         logWarning(s"未知的服务类型: $serviceType，使用默认格式")
         s"$serviceType.$database"
@@ -233,7 +239,7 @@ class OpenmetadataLineageDispatcher(
     
     try {
       tableCache.getOrElseUpdate(cacheKey, {
-        val url = s"${config.apiUrl}/api/v1/tables/name/$cacheKey"
+        val url = s"${config.hostPort}/api/v1/tables/name/$cacheKey"
         logDebug(s"调用OpenMetadata API: $url")
         val tableMap = handleHttpGet(url)
         if (tableMap.nonEmpty) {
