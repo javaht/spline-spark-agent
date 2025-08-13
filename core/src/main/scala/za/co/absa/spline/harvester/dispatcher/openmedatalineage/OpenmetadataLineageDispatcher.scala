@@ -14,11 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package za.co.absa.spline.harvester.dispatcher.openmedataline
+package za.co.absa.spline.harvester.dispatcher.openmedatalineage
 import org.apache.commons.configuration.Configuration
 import org.apache.commons.lang.StringUtils
 import org.apache.spark.internal.Logging
-import okhttp3._
+import scalaj.http.{Http, HttpRequest}
 import scala.util.{Try, Success, Failure}
 import scala.collection.mutable
 import com.alibaba.fastjson2.{JSON, JSONObject}
@@ -26,6 +26,11 @@ import za.co.absa.spline.harvester.dispatcher.AbstractJsonLineageDispatcher
 import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
 import java.util
+
+class OpenLineageClientException(message: String, cause: Throwable) extends Exception(message, cause) {
+  def this(cause: Throwable) = this(cause.getMessage, cause)
+  def this(message: String) = this(message, null)
+}
 
 class OpenmetadataLineageDispatcher(
 
@@ -58,17 +63,23 @@ class OpenmetadataLineageDispatcher(
   } else {
     databasenames= List.empty[String]
   }
-  createPipelineServiceRequest()
+  createOrUpdatePipelineService()
 
 
+  private def createOrUpdatePipelineService(): String = {
+    try {
+      val request = createPipelineServiceRequest()
+      val response = sendRequest(request)
+      response.get("id").toString
+    } catch {
+      case e: Exception =>
+        log.error(s"Failed to create/update service pipeline ${config.pipelineServiceName} in OpenMetadata: ", e)
+        throw new OpenLineageClientException(e)
+    }
+  }
 
 
-
-
-
-
-  def createPipelineServiceRequest(): Option[Request] = {
-    Try {
+  def createPipelineServiceRequest(): HttpRequest = {
       val requestMap = new util.HashMap[String, AnyRef]
       requestMap.put("name", config.pipelineServiceName)
       requestMap.put("serviceType", PIPELINE_SOURCE_TYPE)
@@ -79,30 +90,31 @@ class OpenmetadataLineageDispatcher(
       requestMap.put("connection", connectionConfig)
       val jsonRequest = toJsonString(requestMap)
       createPutRequest("/api/v1/services/pipelineServices", jsonRequest)
-
-    } match {
-      case Success(Some(request)) => Some(request)
-      case Success(None) => None
-      case Failure(exception) =>
-        log.error(s"Failed to create pipeline service request: ${exception.getMessage}")
-        exception.printStackTrace()
-        None
-    }
   }
 
   def toJsonString(obj: AnyRef): String = JSON.toJSONString(obj)
 
-  def createPutRequest(path: String, jsonRequest: String): Option[Request] = {
-    Try {
-      val body = RequestBody.create(jsonRequest, MediaType.parse("application/json; charset=utf-8"))
+  def createPutRequest(path: String, jsonRequest: String): HttpRequest = {
       val fullUrl = s"${config.hostPort}$path"
-      new Request.Builder().url(fullUrl).put(body).addHeader("Content-Type", "application/json").build()
+      Http(fullUrl).put(jsonRequest).header("Content-Type", "application/json")
+  }
+
+
+
+  private def sendRequest(request: HttpRequest): Map[String, Any] = {
+    Try {
+      val response = request.header("Authorization", s"Bearer ${config.jwtToken}").asString
+      if (response.isSuccess) {
+        val jsonResponse = JSON.parseObject(response.body)
+        Map("id" -> jsonResponse.getString("id"))
+      } else {
+        throw new RuntimeException(s"HTTP request failed with status: ${response.code}")
+      }
     } match {
-      case Success(request) => Some(request)
+      case Success(result) => result
       case Failure(exception) =>
-        log.error(s"Failed to create PUT request due to ${exception.getMessage}")
-        exception.printStackTrace()
-        None
+        log.error(s"Failed to send HTTP request: ${exception.getMessage}")
+        throw exception
     }
   }
 
@@ -136,6 +148,15 @@ class OpenmetadataLineageDispatcher(
 
       logInfo(s"目标信息 - 类型: '$targetType', 数据库: '$targetDatabase', 表: '$targetTableName'")
 
+      // TODO: 实现完整的血缘解析逻辑
+      val sourceset = mutable.LinkedHashSet[(String, String, String)]()
+      val target = (targetTableName, "", "")
+      (sourceset, target)
+    } catch {
+      case e: Exception =>
+        logError(s"解析血缘数据时发生异常: ${e.getMessage}")
+        (mutable.LinkedHashSet[(String, String, String)](), ("", "", ""))
+    }
   }
 
   def makeLineage(sourceset: mutable.LinkedHashSet[(String,String,String)], targeTuple: (String,String,String)): Unit = {
