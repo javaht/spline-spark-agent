@@ -116,27 +116,27 @@ public final class OpenMetadataTransport  implements Closeable {
     return HttpClientBuilder.create().setDefaultRequestConfig(config).build();
   }
 
-  @Override
-  public void emit(@NonNull OpenLineage.RunEvent runEvent) {
-    try {
-      log.debug(
-          "Captured Event Type " + runEvent.getEventType().toString() + " to Parse for Lineage");
-      for (OpenLineage.InputDataset input : runEvent.getInputs()) {
-        log.debug("Input Dataset: " + input.getName());
-      }
-      for (OpenLineage.OutputDataset output : runEvent.getOutputs()) {
-        log.debug("Output Dataset: " + output.getName());
-      }
-      if (((runEvent.getEventType().equals(OpenLineage.RunEvent.EventType.COMPLETE))
-              || (runEvent.getEventType().equals(OpenLineage.RunEvent.EventType.START)))
-          && !runEvent.getInputs().isEmpty()
-          && !runEvent.getOutputs().isEmpty()) {
-        (runEvent.getInputs(), runEvent.getOutputs());
-      }
-    } catch (Exception e) {
-      log.error("failed to emit event to OpenMetadata: {}", e.getMessage(), e);
+    @Override
+    public void emit(@NonNull OpenLineage.RunEvent runEvent) {
+        try {
+            log.debug(
+                "Captured Event Type " + runEvent.getEventType().toString() + " to Parse for Lineage");
+            for (OpenLineage.InputDataset input : runEvent.getInputs()) {
+                log.debug("Input Dataset: " + input.getName());
+            }
+            for (OpenLineage.OutputDataset output : runEvent.getOutputs()) {
+                log.debug("Output Dataset: " + output.getName());
+            }
+            if (((runEvent.getEventType().equals(OpenLineage.RunEvent.EventType.COMPLETE))
+                || (runEvent.getEventType().equals(OpenLineage.RunEvent.EventType.START)))
+                && !runEvent.getInputs().isEmpty()
+                && !runEvent.getOutputs().isEmpty()) {
+                sendToOpenMetadata(runEvent.getInputs(), runEvent.getOutputs());
+            }
+        } catch (Exception e) {
+            log.error("failed to emit event to OpenMetadata: {}", e.getMessage(), e);
+        }
     }
-  }
 
 
     private String getTableNames(OpenLineage.Dataset dataset) {
