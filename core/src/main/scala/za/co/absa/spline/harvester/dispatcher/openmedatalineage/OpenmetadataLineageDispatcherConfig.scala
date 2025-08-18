@@ -19,7 +19,7 @@ package za.co.absa.spline.harvester.dispatcher.openmedatalineage
 
 import org.apache.commons.configuration.Configuration
 import za.co.absa.spline.commons.config.ConfigurationImplicits._
-import za.co.absa.spline.harvester.dispatcher.openmedatalineage.OpenmetadataLineageDispatcherConfig.{database_ServiceNames, host_Port, jwt_Token, pipeline_Description, pipeline_Name, pipeline_ServiceName, pipeline_SourceUrl, service_Names}
+import za.co.absa.spline.harvester.dispatcher.openmedatalineage.OpenmetadataLineageDispatcherConfig.{database_ServiceNames, host_Port, jwt_Token, pipeline_Description, pipeline_Name, pipeline_ServiceName, pipeline_SourceUrl}
 
 object OpenmetadataLineageDispatcherConfig {
   val host_Port = "hostPort"

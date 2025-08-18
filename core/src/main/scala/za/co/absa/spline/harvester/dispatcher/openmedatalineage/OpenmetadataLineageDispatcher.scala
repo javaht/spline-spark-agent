@@ -19,14 +19,11 @@ import org.apache.commons.configuration.Configuration
 import org.apache.commons.lang.StringUtils
 import org.apache.spark.internal.Logging
 import scalaj.http.{Http, HttpRequest}
-
 import scala.util.{Failure, Success, Try}
 import scala.collection.mutable
 import com.alibaba.fastjson2.{JSON, JSONObject}
 import za.co.absa.spline.harvester.dispatcher.AbstractJsonLineageDispatcher
-
 import java.net.URI
-import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
 import java.util
 
@@ -78,7 +75,7 @@ class OpenmetadataLineageDispatcher(
   private def getEntity(serviceName: String,databaseName: String,tableName: String): Map[String, JSONObject] = {
     Try {
       val request = createGetTableRequest(Some(serviceName),databaseName,tableName)
-      val response = sendRequest(request)
+      val response = sendSearchRequest(request)
       println(s"Response keys: ${response.keys}")
       val hitsResult = response("hits").asInstanceOf[Map[String, Any]]
       val totalHits = hitsResult("total").asInstanceOf[Map[String, Any]]("value").toString.toInt
@@ -170,7 +167,7 @@ class OpenmetadataLineageDispatcher(
       requestMap.put("description", ${config.pipelineDescription} )
     }
 
-    requestMap.put("service", ${config.pipelineServiceName} )
+    requestMap.put("service", config.pipelineServiceName)
     val jsonRequest = toJsonString(requestMap)
     createPutRequest("/api/v1/pipelines", jsonRequest)
   }
@@ -227,11 +224,29 @@ class OpenmetadataLineageDispatcher(
     }
   }
 
+  private def sendSearchRequest(request: HttpRequest): Map[String, Any] = {
+    Try {
+      val response = request.header("Authorization", s"Bearer ${config.jwtToken}").asString
+      if (response.isSuccess) {
+        val jsonResponse = JSON.parseObject(response.body)
+        // 将 JSONObject 转换为 Map
+        jsonResponse.asScala.toMap
+      } else {
+        throw new RuntimeException(s"HTTP search request failed with status: ${response.code}")
+      }
+    } match {
+      case Success(result) => result
+      case Failure(exception) =>
+        log.error(s"Failed to send search HTTP request: ${exception.getMessage}")
+        throw exception
+    }
+  }
+
 
   def sendMetadataLineage(jsonData: String,pipserviceId: String): Unit = {
     try {
-      logDebug(s"原始血缘数据: $jsonData")
       createOrUpdatePipeline()
+      logDebug(s"原始血缘数据: $jsonData")
       val operations = JSON.parseObject(jsonData).getJSONObject("operations")
       val write = operations.getJSONObject("write")
       val targetType = getStringValue(write, "extra.destinationType")
@@ -248,25 +263,29 @@ class OpenmetadataLineageDispatcher(
         val sourceDatabase = getStringValue(readObj, "params.table.identifier.database")
         logInfo(s"源${i + 1}信息 - 类型: '$sourceType', 数据库: '$sourceDatabase', 表: '$sourceTable'")
         val sourceEntity: Map[String, JSONObject] = getEntity(sourceType, sourceDatabase, sourceTable)
-        val lineageRequest = createLineageRequest(pipserviceId, sourceEntity, targetEntity, sourceTable, targetTableName)
+        
+        if (sourceEntity.nonEmpty && targetEntity.nonEmpty) {
+          val lineageRequest = createLineageRequest(pipserviceId, sourceEntity, targetEntity, jsonData)
 
-        try {
-          val response = sendRequest(lineageRequest)
-          logInfo(s"Successfully created lineage from $sourceTable to $targetTableName")
-        } catch {
-          case e: Exception =>
-            logError(s"Failed to create lineage from $sourceTable to $targetTableName: ${e.getMessage}")
+          try {
+            val response = sendRequest(lineageRequest)
+            logInfo(s"Successfully created lineage from $sourceTable to $targetTableName")
+          } catch {
+            case e: Exception =>
+              logError(s"Failed to create lineage from $sourceTable to $targetTableName: ${e.getMessage}")
+          }
+        } else {
+          logWarning(s"Skipping lineage creation: sourceEntity.isEmpty=${sourceEntity.isEmpty}, targetEntity.isEmpty=${targetEntity.isEmpty}")
         }
       }
     } catch {
       case e: Exception =>
         logError(s"解析血缘数据时发生异常: ${e.getMessage}")
-        (mutable.LinkedHashSet[(String, String, String)](), ("", "", ""))
     }
   }
 
 
-  def createLineageRequest(pipserviceId: String, fromEntity: Map[String, JSONObject], toEntity: Map[String, JSONObject], fromTable: String, toTable: String): HttpRequest = {
+  def createLineageRequest(pipserviceId: String, fromEntity: Map[String, JSONObject], toEntity: Map[String, JSONObject], jsonData: String): HttpRequest = {
     val fromEntityJson = fromEntity.values.head
     val toEntityJson = toEntity.values.head
 
@@ -276,7 +295,7 @@ class OpenmetadataLineageDispatcher(
       "lineageDetails" -> Map(
         "pipeline" -> createPipelineEntityMap(pipserviceId),
         "source" -> SPARK_LINEAGE_SOURCE,
-        "columnsLineage" -> getColumnLevelLineage()
+        "columnsLineage" -> getColumnLevelLineage(jsonData, fromEntityJson.getString("fullyQualifiedName"), toEntityJson.getString("fullyQualifiedName"))
       )
     )
 
@@ -289,9 +308,9 @@ class OpenmetadataLineageDispatcher(
     Map(
       "id" -> pipserviceId,
       "type" -> "pipelineService",
-      "name" -> config.pipelineName,
-      "fullyQualifiedName" -> s"${config.pipelineName}",
-      "href" -> s"${config.hostPort}/api//v1/pipelines/${pipserviceId}",
+      "name" -> config.pipelineServiceName,
+      "fullyQualifiedName" -> config.pipelineServiceName,
+      "href" -> s"${config.hostPort}/api/v1/services/pipelineServices/${pipserviceId}",
       "deleted" -> false,
       "inherited" -> true
     )
@@ -311,8 +330,145 @@ class OpenmetadataLineageDispatcher(
     )
   }
 
-  private def getColumnLevelLineage(): List[Map[String, Any]] = {
-    List.empty[Map[String, Any]]
+  private def getColumnLevelLineage(jsonData: String, sourceTableFqn: String, targetTableFqn: String): List[Map[String, Any]] = {
+    try {
+      val json = JSON.parseObject(jsonData)
+      val operations = json.getJSONObject("operations")
+      val reads = operations.getJSONArray("reads")
+      val write = operations.getJSONObject("write")
+      val attributeMap = buildAttributeMap(json.getJSONArray("attributes"))
+      val otherOps = operations.getJSONArray("other")
+
+      val lineageResults = mutable.ListBuffer[Map[String, Any]]()
+
+      if (reads != null && reads.size() > 0) {
+        // 获取源表的输出列
+        val firstRead = reads.getJSONObject(0)
+        val sourceOutputAttrs = Option(firstRead.getJSONArray("output")).map(_.asScala.toList.map(_.toString)).getOrElse(List.empty)
+
+        // 获取最终写入操作的输入列（这些是实际写入目标表的列）
+        val writeInputAttrs = getWriteInputAttributes(write, otherOps)
+
+        // 构建列级血缘关系
+        val columnMappings = traceColumnLineage(sourceOutputAttrs, writeInputAttrs, otherOps, attributeMap)
+        
+        columnMappings.foreach { case (sourceAttrs, targetAttr) =>
+          val sourceColumns = sourceAttrs.map(attrId => {
+            val columnName = attributeMap.getOrElse(attrId, attrId)
+            s"$sourceTableFqn.$columnName"
+          })
+          val targetColumnName = attributeMap.getOrElse(targetAttr, targetAttr)
+          
+          lineageResults += Map(
+            "fromColumns" -> sourceColumns,
+            "toColumn" -> s"$targetTableFqn.$targetColumnName"
+          )
+        }
+      }
+
+      logInfo(s"Generated ${lineageResults.size} column lineage entries")
+      lineageResults.toList
+    } catch {
+      case e: Exception =>
+        logError(s"Failed to parse column level lineage: ${e.getMessage}")
+        fallbackToSimpleMapping(jsonData, sourceTableFqn, targetTableFqn)
+    }
+  }
+
+  private def getWriteInputAttributes(write: JSONObject, otherOps: com.alibaba.fastjson2.JSONArray): List[String] = {
+    // 从写操作的子操作中获取输入属性
+    val childIds = Option(write.getJSONArray("childIds"))
+      .map(_.asScala.toList.map(_.toString))
+      .getOrElse(List.empty)
+    
+    if (childIds.nonEmpty && otherOps != null) {
+      // 找到写操作的直接子操作
+      val directChild = otherOps.asScala.find { op =>
+        val opObj = op.asInstanceOf[JSONObject]
+        childIds.contains(opObj.getString("id"))
+      }
+      
+      directChild match {
+        case Some(childOp) =>
+          val childOpObj = childOp.asInstanceOf[JSONObject]
+          Option(childOpObj.getJSONArray("output"))
+            .map(_.asScala.toList.map(_.toString))
+            .getOrElse(List.empty)
+        case None => List.empty
+      }
+    } else {
+      List.empty
+    }
+  }
+
+  private def traceColumnLineage(
+    sourceAttrs: List[String], 
+    targetAttrs: List[String], 
+    otherOps: com.alibaba.fastjson2.JSONArray,
+    attributeMap: Map[String, String]
+  ): List[(List[String], String)] = {
+    
+    // 简化版本：假设列的顺序对应关系
+    // 在实际实现中，需要分析 Project 操作的 projectList 来建立精确映射
+    val mappings = mutable.ListBuffer[(List[String], String)]()
+    
+    val minSize = Math.min(sourceAttrs.size, targetAttrs.size)
+    for (i <- 0 until minSize) {
+      mappings += ((List(sourceAttrs(i)), targetAttrs(i)))
+    }
+    
+    mappings.toList
+  }
+
+  private def fallbackToSimpleMapping(jsonData: String, sourceTableFqn: String, targetTableFqn: String): List[Map[String, Any]] = {
+    try {
+      val json = JSON.parseObject(jsonData)
+      val operations = json.getJSONObject("operations")
+      val reads = operations.getJSONArray("reads")
+      val attributeMap = buildAttributeMap(json.getJSONArray("attributes"))
+
+      val lineageResults = mutable.ListBuffer[Map[String, Any]]()
+
+      if (reads != null && reads.size() > 0) {
+        val firstRead = reads.getJSONObject(0)
+        val readOutputAttrs = Option(firstRead.getJSONArray("output"))
+          .map(_.asScala.toList.map(_.toString))
+          .getOrElse(List.empty)
+
+        readOutputAttrs.foreach { attrId =>
+          val columnName = attributeMap.getOrElse(attrId, attrId)
+          
+          lineageResults += Map(
+            "fromColumns" -> List(s"$sourceTableFqn.$columnName"),
+            "toColumn" -> s"$targetTableFqn.$columnName"
+          )
+        }
+      }
+
+      logWarning("使用简单列映射作为降级方案")
+      lineageResults.toList
+    } catch {
+      case e: Exception =>
+        logError(s"降级方案也失败了: ${e.getMessage}")
+        List.empty[Map[String, Any]]
+    }
+  }
+
+  private def buildAttributeMap(attributesJson: com.alibaba.fastjson2.JSONArray): Map[String, String] = {
+    if (attributesJson == null) {
+      return Map.empty[String, String]
+    }
+    
+    attributesJson.asScala.collect {
+      case attr: JSONObject => 
+        val id = attr.getString("id")
+        val name = attr.getString("name")
+        if (id != null && name != null) {
+          id -> name
+        } else {
+          null
+        }
+    }.filter(_ != null).toMap
   }
 
   private def getStringValue(json: JSONObject, path: String): String = {
