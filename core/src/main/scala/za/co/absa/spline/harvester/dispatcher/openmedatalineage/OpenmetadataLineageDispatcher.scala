@@ -161,10 +161,10 @@ class OpenmetadataLineageDispatcher(
 
   def createPipelineRequest(): HttpRequest = {
     val requestMap = scala.collection.mutable.Map[String, Object]()
-    requestMap.put("name", ${config.pipelineName})
-    requestMap.put("sourceUrl", ${config.pipelineSourceUrl})
-    if (${config.pipelineDescription} != null && ${config.pipelineDescription} .nonEmpty) {
-      requestMap.put("description", ${config.pipelineDescription} )
+    requestMap.put("name", config.pipelineName)
+    requestMap.put("sourceUrl", config.pipelineSourceUrl)
+    if (config.pipelineDescription != null && config.pipelineDescription.nonEmpty) {
+      requestMap.put("description", config.pipelineDescription)
     }
 
     requestMap.put("service", config.pipelineServiceName)
@@ -265,7 +265,7 @@ class OpenmetadataLineageDispatcher(
         val sourceEntity: Map[String, JSONObject] = getEntity(sourceType, sourceDatabase, sourceTable)
         
         if (sourceEntity.nonEmpty && targetEntity.nonEmpty) {
-          val lineageRequest = createLineageRequest(pipserviceId, sourceEntity, targetEntity, jsonData)
+          val lineageRequest = createLineageRequest(pipserviceId, sourceEntity, targetEntity, jsonData, i)
 
           try {
             val response = sendRequest(lineageRequest)
@@ -285,7 +285,7 @@ class OpenmetadataLineageDispatcher(
   }
 
 
-  def createLineageRequest(pipserviceId: String, fromEntity: Map[String, JSONObject], toEntity: Map[String, JSONObject], jsonData: String): HttpRequest = {
+  def createLineageRequest(pipserviceId: String, fromEntity: Map[String, JSONObject], toEntity: Map[String, JSONObject], jsonData: String, sourceIndex: Int): HttpRequest = {
     val fromEntityJson = fromEntity.values.head
     val toEntityJson = toEntity.values.head
 
@@ -295,7 +295,7 @@ class OpenmetadataLineageDispatcher(
       "lineageDetails" -> Map(
         "pipeline" -> createPipelineEntityMap(pipserviceId),
         "source" -> SPARK_LINEAGE_SOURCE,
-        "columnsLineage" -> getColumnLevelLineage(jsonData, fromEntityJson.getString("fullyQualifiedName"), toEntityJson.getString("fullyQualifiedName"))
+        "columnsLineage" -> getColumnLevelLineage(jsonData, fromEntityJson.getString("fullyQualifiedName"), toEntityJson.getString("fullyQualifiedName"), sourceIndex)
       )
     )
 
@@ -330,7 +330,7 @@ class OpenmetadataLineageDispatcher(
     )
   }
 
-  private def getColumnLevelLineage(jsonData: String, sourceTableFqn: String, targetTableFqn: String): List[Map[String, Any]] = {
+  private def getColumnLevelLineage(jsonData: String, sourceTableFqn: String, targetTableFqn: String, sourceIndex: Int): List[Map[String, Any]] = {
     try {
       val json = JSON.parseObject(jsonData)
       val operations = json.getJSONObject("operations")
@@ -341,10 +341,10 @@ class OpenmetadataLineageDispatcher(
 
       val lineageResults = mutable.ListBuffer[Map[String, Any]]()
 
-      if (reads != null && reads.size() > 0) {
-        // 获取源表的输出列
-        val firstRead = reads.getJSONObject(0)
-        val sourceOutputAttrs = Option(firstRead.getJSONArray("output")).map(_.asScala.toList.map(_.toString)).getOrElse(List.empty)
+      if (reads != null && reads.size() > sourceIndex) {
+        // 获取指定索引的源表的输出列
+        val currentRead = reads.getJSONObject(sourceIndex)
+        val sourceOutputAttrs = Option(currentRead.getJSONArray("output")).map(_.asScala.toList.map(_.toString)).getOrElse(List.empty)
 
         // 获取最终写入操作的输入列（这些是实际写入目标表的列）
         val writeInputAttrs = getWriteInputAttributes(write, otherOps)
@@ -366,12 +366,12 @@ class OpenmetadataLineageDispatcher(
         }
       }
 
-      logInfo(s"Generated ${lineageResults.size} column lineage entries")
+      logInfo(s"Generated ${lineageResults.size} column lineage entries for source table index $sourceIndex")
       lineageResults.toList
     } catch {
       case e: Exception =>
         logError(s"Failed to parse column level lineage: ${e.getMessage}")
-        fallbackToSimpleMapping(jsonData, sourceTableFqn, targetTableFqn)
+        fallbackToSimpleMapping(jsonData, sourceTableFqn, targetTableFqn, sourceIndex)
     }
   }
 
@@ -420,7 +420,7 @@ class OpenmetadataLineageDispatcher(
     mappings.toList
   }
 
-  private def fallbackToSimpleMapping(jsonData: String, sourceTableFqn: String, targetTableFqn: String): List[Map[String, Any]] = {
+  private def fallbackToSimpleMapping(jsonData: String, sourceTableFqn: String, targetTableFqn: String, sourceIndex: Int): List[Map[String, Any]] = {
     try {
       val json = JSON.parseObject(jsonData)
       val operations = json.getJSONObject("operations")
@@ -429,9 +429,9 @@ class OpenmetadataLineageDispatcher(
 
       val lineageResults = mutable.ListBuffer[Map[String, Any]]()
 
-      if (reads != null && reads.size() > 0) {
-        val firstRead = reads.getJSONObject(0)
-        val readOutputAttrs = Option(firstRead.getJSONArray("output"))
+      if (reads != null && reads.size() > sourceIndex) {
+        val currentRead = reads.getJSONObject(sourceIndex)
+        val readOutputAttrs = Option(currentRead.getJSONArray("output"))
           .map(_.asScala.toList.map(_.toString))
           .getOrElse(List.empty)
 
@@ -445,7 +445,7 @@ class OpenmetadataLineageDispatcher(
         }
       }
 
-      logWarning("使用简单列映射作为降级方案")
+      logWarning(s"使用简单列映射作为降级方案 (源表索引: $sourceIndex)")
       lineageResults.toList
     } catch {
       case e: Exception =>
