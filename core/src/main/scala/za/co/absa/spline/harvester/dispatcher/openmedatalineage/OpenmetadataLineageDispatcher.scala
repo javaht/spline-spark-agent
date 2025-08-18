@@ -60,15 +60,16 @@ class OpenmetadataLineageDispatcher(
   } else {
     databasenames= List.empty[String]
   }
-  //第一步做这个
-  createOrUpdatePipelineService()
+
 
 
   override protected def send(data: String): Unit = {
     if (data.startsWith("ExecutionPlan")) {
       val jsonData = StringUtils.replace(data, "ExecutionPlan (apiVersion: 1.2):", "")
-      //从这个jsondata中解析出sourceentity,targetentity,sourcetable,targettable
-      val (sourceset, target) = getSourceAndTarget(jsonData)
+      //创建pipeline Service
+      createOrUpdatePipelineService()
+      //从这个jsondata中解析出sourceentity,targetentity,sourcetable,targettable 构建血缘
+      sendMetadataLineage(jsonData)
 
     }
   }
@@ -96,17 +97,17 @@ class OpenmetadataLineageDispatcher(
           val description = tableSource.getOrElse("description", "").toString
           val displayName = tableSource.getOrElse("displayName", tableName).toString
           val deleted = tableSource.getOrElse("deleted", false).asInstanceOf[Boolean]
-          val fromEntityJson = new JSONObject()
-          fromEntityJson.put("id", tableId: Object)
-          fromEntityJson.put("name", tableName: Object)
-          fromEntityJson.put("fullyQualifiedName", fullyQualifiedName: Object)
-          fromEntityJson.put("deleted", java.lang.Boolean.valueOf(deleted): Object)
-          fromEntityJson.put("description", description: Object)
-          fromEntityJson.put("displayName", displayName: Object)
-          fromEntityJson.put("href", s"${config.hostPort}/api/v1/tables/$tableId": Object)
-          fromEntityJson.put("inherited", java.lang.Boolean.valueOf(true): Object)
-          fromEntityJson.put("type", "table": Object)
-          tableName -> fromEntityJson
+          val entityJson = new JSONObject()
+          entityJson.put("id", tableId: Object)
+          entityJson.put("name", tableName: Object)
+          entityJson.put("fullyQualifiedName", fullyQualifiedName: Object)
+          entityJson.put("deleted", java.lang.Boolean.valueOf(deleted): Object)
+          entityJson.put("description", description: Object)
+          entityJson.put("displayName", displayName: Object)
+          entityJson.put("href", s"${config.hostPort}/api/v1/tables/$tableId": Object)
+          entityJson.put("inherited", java.lang.Boolean.valueOf(true): Object)
+          entityJson.put("type", "table": Object)
+          tableName -> entityJson
         }.toMap
         resultMap
       }
@@ -125,7 +126,7 @@ class OpenmetadataLineageDispatcher(
       case Some(service) => s"$service.*.$databaseName.*$tableName"
       case None => s"*$tableName"
     }
-    createESRequest( fqnQuery, TABLE_SEARCH_INDEX)
+    createESRequest(fqnQuery, TABLE_SEARCH_INDEX)
   }
 
     def createESRequest(fieldValue: String, index: String): HttpRequest = {
@@ -170,7 +171,7 @@ class OpenmetadataLineageDispatcher(
       requestMap.put("description", ${config.pipelineDescription} )
     }
 
-    requestMap.put("service", ${config.serviceNames} )
+    requestMap.put("service", ${config.pipelineServiceName} )
     val jsonRequest = toJsonString(requestMap)
     createPutRequest("/api/v1/pipelines", jsonRequest)
   }
@@ -228,9 +229,7 @@ class OpenmetadataLineageDispatcher(
   }
 
 
-
-
-  def getSourceAndTarget(jsonData: String): (mutable.LinkedHashSet[(String, String, String)], (String, String, String)) = {
+  def sendMetadataLineage(jsonData: String): Unit = {
     try {
       logDebug(s"原始血缘数据: $jsonData")
       val pipelineId = createOrUpdatePipeline()
@@ -242,7 +241,6 @@ class OpenmetadataLineageDispatcher(
       val targetEntity: Map[String, JSONObject] = getEntity(targetType, targetDatabase, targetTableName)
 
       val readsArray = operations.getJSONArray("reads")
-      val sourceset = mutable.LinkedHashSet[(String, String, String)]()
 
       for (i <- 0 until readsArray.size()) {
         val readObj = readsArray.getJSONObject(i)
@@ -250,16 +248,17 @@ class OpenmetadataLineageDispatcher(
         val sourceTable = getStringValue(readObj, "params.table.identifier.table")
         val sourceDatabase = getStringValue(readObj, "params.table.identifier.database")
         logInfo(s"源${i + 1}信息 - 类型: '$sourceType', 数据库: '$sourceDatabase', 表: '$sourceTable'")
-        val sourceEntity = getEntity(sourceType, sourceDatabase, sourceTable)
-        createLineageRequest(pipelineId, sourceEntity, targetEntity, sourceTable, targetTableName)
+        val sourceEntity: Map[String, JSONObject] = getEntity(sourceType, sourceDatabase, sourceTable)
+        val lineageRequest = createLineageRequest(pipelineId, sourceEntity, targetEntity, sourceTable, targetTableName)
+
+        try {
+          val response = sendRequest(lineageRequest)
+          logInfo(s"Successfully created lineage from $sourceTable to $targetTableName")
+        } catch {
+          case e: Exception =>
+            logError(s"Failed to create lineage from $sourceTable to $targetTableName: ${e.getMessage}")
+        }
       }
-
-
-
-
-
-      val target = (targetTableName, "", "")
-      (sourceset, target)
     } catch {
       case e: Exception =>
         logError(s"解析血缘数据时发生异常: ${e.getMessage}")
@@ -268,42 +267,54 @@ class OpenmetadataLineageDispatcher(
   }
 
 
-
-
-
-  def createLineageRequest(
-    pipelineId: String,
-    fromEntity: Map[String, Any],
-    toEntity: Map[String, Any],
-    fromTable: String,
-    toTable: String
-  ): HttpRequest = {
+  def createLineageRequest(pipelineId: String, fromEntity: Map[String, JSONObject], toEntity: Map[String, JSONObject], fromTable: String, toTable: String): HttpRequest = {
+    val fromEntityJson = fromEntity.values.head
+    val toEntityJson = toEntity.values.head
 
     val edgeMap = Map(
-      "toEntity" -> createEntityMap(toEntity("entityType").toString, toEntity("id").toString),
-      "fromEntity" -> createEntityMap(fromEntity("entityType").toString, fromEntity("id").toString)
+      "toEntity" -> convertJSONObjectToMap(toEntityJson),
+      "fromEntity" -> convertJSONObjectToMap(fromEntityJson),
+      "lineageDetails" -> Map(
+        "pipeline" -> createPipelineEntityMap(pipelineId),
+        "source" -> SPARK_LINEAGE_SOURCE,
+        "columnsLineage" -> getColumnLevelLineage(fromEntityJson, toEntityJson, fromTable, toTable)
+      )
     )
 
-    val lineageDetails = Map(
-      "pipeline" -> createEntityMap("pipeline", pipelineId),
-      "source" -> SPARK_LINEAGE_SOURCE,
-      "columnsLineage" -> getColumnLevelLineage(fromEntity, toEntity, fromTable, toTable)
-    )
-
-    val edgeMapWithLineage = edgeMap + ("lineageDetails" -> lineageDetails)
-
-    val requestMap = Map("edge" -> edgeMapWithLineage)
-
+    val requestMap = Map("edge" -> edgeMap)
     val jsonRequest = toJsonString(requestMap)
-
-    Http("/api/v1/lineage")
-      .method("PUT")
-      .postData(jsonRequest)
-      .header("Content-Type", "application/json")
+    createPutRequest("/api/v1/lineage", jsonRequest)
   }
 
-  private def createEntityMap(entityType: String, id: String): Map[String, Any] = {
-    Map("type" -> entityType, "id" -> id)
+  private def createPipelineEntityMap(pipelineId: String): Map[String, Any] = {
+    Map(
+      "id" -> pipelineId,
+      "type" -> PIPELINE_SOURCE_TYPE,
+      "name" -> config.pipelineName,
+      "fullyQualifiedName" -> s"${config.pipelineServiceName}.${config.pipelineName}",
+      "href" -> s"${config.hostPort}/api/v1/pipelines/${config.pipelineServiceName}.${config.pipelineName}",
+      "deleted" -> false,
+      "inherited" -> true
+    )
+  }
+
+  private def convertJSONObjectToMap(jsonObject: JSONObject): Map[String, Any] = {
+    Map(
+      "id" -> jsonObject.getString("id"),
+      "name" -> jsonObject.getString("name"),
+      "fullyQualifiedName" -> jsonObject.getString("fullyQualifiedName"),
+      "deleted" -> jsonObject.getBoolean("deleted"),
+      "description" -> jsonObject.getString("description"),
+      "displayName" -> jsonObject.getString("displayName"),
+      "href" -> jsonObject.getString("href"),
+      "inherited" -> jsonObject.getBoolean("inherited"),
+      "type" -> jsonObject.getString("type")
+    )
+  }
+
+  private def getColumnLevelLineage(fromEntity: JSONObject, toEntity: JSONObject, fromTable: String, toTable: String): List[Map[String, Any]] = {
+    // For now, return empty list - you can implement column-level lineage logic here
+    List.empty[Map[String, Any]]
   }
 
   private def getStringValue(json: JSONObject, path: String): String = {
@@ -314,21 +325,17 @@ class OpenmetadataLineageDispatcher(
         if (obj != null && obj.containsKey(key)) {
           obj.getJSONObject(key)
         } else {
-          logDebug(s"路径 '$path' 中的键 '$key' 不存在或为null")
           null
         }
       }
       if (parentObj != null && parentObj.containsKey(keys(lastIndex))) {
         val value = parentObj.getString(keys(lastIndex))
-        logDebug(s"成功提取路径 '$path' 的值: '$value'")
         value
       } else {
-        logDebug(s"路径 '$path' 的最终键 '${keys(lastIndex)}' 不存在")
         ""
       }
     } catch {
       case e: Exception =>
-        logWarning(s"提取路径 '$path' 的值时发生异常: ${e.getMessage}")
         ""
     }
   }

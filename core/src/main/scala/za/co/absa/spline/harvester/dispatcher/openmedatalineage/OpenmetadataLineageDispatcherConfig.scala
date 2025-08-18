@@ -24,7 +24,6 @@ import za.co.absa.spline.harvester.dispatcher.openmedatalineage.OpenmetadataLine
 object OpenmetadataLineageDispatcherConfig {
   val host_Port = "hostPort"
   val jwt_Token = "jwtToken"
-  val service_Names = "serviceNames"
   val pipeline_Name = "pipelineName"
 
   val pipeline_SourceUrl="pipelineSourceUrl"
@@ -40,7 +39,6 @@ class OpenmetadataLineageDispatcherConfig(config: Configuration) {
 
   val hostPort: String = config.getRequiredString(host_Port)
   var jwtToken: String = getJwtToken(jwt_Token)
-  val serviceNames: String = config.getRequiredString(service_Names)
   val pipelineName: String = config.getRequiredString(pipeline_Name)
 
   val pipelineSourceUrl: String = config.getRequiredString(pipeline_SourceUrl)
