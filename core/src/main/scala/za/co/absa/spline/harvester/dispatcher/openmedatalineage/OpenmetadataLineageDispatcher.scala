@@ -66,10 +66,10 @@ class OpenmetadataLineageDispatcher(
   override protected def send(data: String): Unit = {
     if (data.startsWith("ExecutionPlan")) {
       val jsonData = StringUtils.replace(data, "ExecutionPlan (apiVersion: 1.2):", "")
-      //创建pipeline Service
-      createOrUpdatePipelineService()
+      //创建pipeline Service  注意这里的id之后放置列级别的血缘会用到
+      val pipserviceId = createOrUpdatePipelineService()
       //从这个jsondata中解析出sourceentity,targetentity,sourcetable,targettable 构建血缘
-      sendMetadataLineage(jsonData)
+      sendMetadataLineage(jsonData,pipserviceId)
 
     }
   }
@@ -166,7 +166,6 @@ class OpenmetadataLineageDispatcher(
     val requestMap = scala.collection.mutable.Map[String, Object]()
     requestMap.put("name", ${config.pipelineName})
     requestMap.put("sourceUrl", ${config.pipelineSourceUrl})
-
     if (${config.pipelineDescription} != null && ${config.pipelineDescription} .nonEmpty) {
       requestMap.put("description", ${config.pipelineDescription} )
     }
@@ -229,10 +228,10 @@ class OpenmetadataLineageDispatcher(
   }
 
 
-  def sendMetadataLineage(jsonData: String): Unit = {
+  def sendMetadataLineage(jsonData: String,pipserviceId: String): Unit = {
     try {
       logDebug(s"原始血缘数据: $jsonData")
-      val pipelineId = createOrUpdatePipeline()
+      createOrUpdatePipeline()
       val operations = JSON.parseObject(jsonData).getJSONObject("operations")
       val write = operations.getJSONObject("write")
       val targetType = getStringValue(write, "extra.destinationType")
@@ -249,7 +248,7 @@ class OpenmetadataLineageDispatcher(
         val sourceDatabase = getStringValue(readObj, "params.table.identifier.database")
         logInfo(s"源${i + 1}信息 - 类型: '$sourceType', 数据库: '$sourceDatabase', 表: '$sourceTable'")
         val sourceEntity: Map[String, JSONObject] = getEntity(sourceType, sourceDatabase, sourceTable)
-        val lineageRequest = createLineageRequest(pipelineId, sourceEntity, targetEntity, sourceTable, targetTableName)
+        val lineageRequest = createLineageRequest(pipserviceId, sourceEntity, targetEntity, sourceTable, targetTableName)
 
         try {
           val response = sendRequest(lineageRequest)
@@ -267,7 +266,7 @@ class OpenmetadataLineageDispatcher(
   }
 
 
-  def createLineageRequest(pipelineId: String, fromEntity: Map[String, JSONObject], toEntity: Map[String, JSONObject], fromTable: String, toTable: String): HttpRequest = {
+  def createLineageRequest(pipserviceId: String, fromEntity: Map[String, JSONObject], toEntity: Map[String, JSONObject], fromTable: String, toTable: String): HttpRequest = {
     val fromEntityJson = fromEntity.values.head
     val toEntityJson = toEntity.values.head
 
@@ -275,9 +274,9 @@ class OpenmetadataLineageDispatcher(
       "toEntity" -> convertJSONObjectToMap(toEntityJson),
       "fromEntity" -> convertJSONObjectToMap(fromEntityJson),
       "lineageDetails" -> Map(
-        "pipeline" -> createPipelineEntityMap(pipelineId),
+        "pipeline" -> createPipelineEntityMap(pipserviceId),
         "source" -> SPARK_LINEAGE_SOURCE,
-        "columnsLineage" -> getColumnLevelLineage(fromEntityJson, toEntityJson, fromTable, toTable)
+        "columnsLineage" -> getColumnLevelLineage()
       )
     )
 
@@ -286,13 +285,13 @@ class OpenmetadataLineageDispatcher(
     createPutRequest("/api/v1/lineage", jsonRequest)
   }
 
-  private def createPipelineEntityMap(pipelineId: String): Map[String, Any] = {
+  private def createPipelineEntityMap(pipserviceId: String): Map[String, Any] = {
     Map(
-      "id" -> pipelineId,
-      "type" -> PIPELINE_SOURCE_TYPE,
+      "id" -> pipserviceId,
+      "type" -> "pipelineService",
       "name" -> config.pipelineName,
-      "fullyQualifiedName" -> s"${config.pipelineServiceName}.${config.pipelineName}",
-      "href" -> s"${config.hostPort}/api/v1/pipelines/${config.pipelineServiceName}.${config.pipelineName}",
+      "fullyQualifiedName" -> s"${config.pipelineName}",
+      "href" -> s"${config.hostPort}/api//v1/pipelines/${pipserviceId}",
       "deleted" -> false,
       "inherited" -> true
     )
@@ -312,8 +311,7 @@ class OpenmetadataLineageDispatcher(
     )
   }
 
-  private def getColumnLevelLineage(fromEntity: JSONObject, toEntity: JSONObject, fromTable: String, toTable: String): List[Map[String, Any]] = {
-    // For now, return empty list - you can implement column-level lineage logic here
+  private def getColumnLevelLineage(): List[Map[String, Any]] = {
     List.empty[Map[String, Any]]
   }
 
