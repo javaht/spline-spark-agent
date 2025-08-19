@@ -1,55 +1,58 @@
 package za.co.absa.spline.harvester.dispatcher.openmedatalineage
 
-import com.alibaba.fastjson2.{JSON, JSONArray, JSONObject}
+import com.alibaba.fastjson2.{JSON, JSONObject}
 import org.apache.commons.lang.StringUtils
 import scalaj.http.{Http, HttpRequest}
-
 import java.net.URI
 import java.util
 import scala.util.{Failure, Success, Try}
 import scala.collection.JavaConverters._
 import scala.collection.mutable
+
+
+
 object test {
   private val SPARK_LINEAGE_SOURCE: String = "SparkLineage"
   private val TABLE_SEARCH_INDEX: String = "table_search_index"
   private val PIPELINE_SOURCE_TYPE: String = "Spark"
 
   def main(args: Array[String]): Unit = {
+    // 读取 xueyuan.txt 文件中的 JSON 数据
+    val source = scala.io.Source.fromFile("core/src/main/scala/za/co/absa/spline/harvester/dispatcher/openmedatalineage/xueyuan.txt")
+    val data = try source.mkString finally source.close()
+    
+    val jsonData = StringUtils.replace(data, "ExecutionPlan (apiVersion: 1.2):", "")
+      //创建pipeline Service  注意这里的id之后放置列级别的血缘会用到
+      val pipserviceId = createOrUpdatePipelineService()
+      //从这个jsondata中解析出sourceentity,targetentity,sourcetable,targettable 构建血缘
+      sendMetadataLineage(jsonData,pipserviceId)
 
-
-
-//    if (data.startsWith("ExecutionPlan")) {
-//      val jsonData = StringUtils.replace(data, "ExecutionPlan (apiVersion: 1.2):", "")
-//      //创建pipeline Service  注意这里的id之后放置列级别的血缘会用到
-//      val pipserviceId = createOrUpdatePipelineService()
-//      //从这个jsondata中解析出sourceentity,targetentity,sourcetable,targettable 构建血缘
-//      sendMetadataLineage(jsonData,pipserviceId)
-//
-//    }
+    
   }
 
   private def getEntity(serviceName: String,databaseName: String,tableName: String): Map[String, JSONObject] = {
     Try {
       val request = createGetTableRequest(Some(serviceName),databaseName,tableName)
       val response = sendSearchRequest(request)
-      println(s"Response keys: ${response.keys}")
-      val hitsResult = response("hits").asInstanceOf[Map[String, Any]]
-      val totalHits = hitsResult("total").asInstanceOf[Map[String, Any]]("value").toString.toInt
+      println(s"Response: $response")
+      val hitsResult = response.getJSONObject("hits")
+      val totalHits = hitsResult.getJSONObject("total").getIntValue("value")
 
       if (totalHits == 0) {
         println(s"Failed to get id of table from OpenMetadata.")
         Map.empty[String, JSONObject]
       } else {
-        val tablesData = hitsResult("hits").asInstanceOf[List[Map[String, Any]]]
-        println(s"Found ${tablesData.length} tables")
-        val resultMap = tablesData.map { tableHit =>
-          val tableSource = tableHit("_source").asInstanceOf[Map[String, Any]]
-          val tableName = tableSource.getOrElse("name", "unknown").toString
-          val tableId = tableSource.getOrElse("id", "").toString
-          val fullyQualifiedName = tableSource.getOrElse("fullyQualifiedName", "").toString
-          val description = tableSource.getOrElse("description", "").toString
-          val displayName = tableSource.getOrElse("displayName", tableName).toString
-          val deleted = tableSource.getOrElse("deleted", false).asInstanceOf[Boolean]
+        val tablesData = hitsResult.getJSONArray("hits")
+        println(s"Found ${tablesData.size()} tables")
+        val resultMap = (0 until tablesData.size()).map { i =>
+          val tableHit = tablesData.getJSONObject(i)
+          val tableSource = tableHit.getJSONObject("_source")
+          val tableName = tableSource.getString("name")
+          val tableId = tableSource.getString("id")
+          val fullyQualifiedName = tableSource.getString("fullyQualifiedName")
+          val description = Option(tableSource.getString("description")).getOrElse("")
+          val displayName = Option(tableSource.getString("displayName")).getOrElse(tableName)
+          val deleted = tableSource.getBooleanValue("deleted")
           val entityJson = new JSONObject()
           entityJson.put("id", tableId: Object)
           entityJson.put("name", tableName: Object)
@@ -76,7 +79,7 @@ object test {
 
   def createGetTableRequest(dbServiceName: Option[String] = None,databaseName: String,tableName: String): HttpRequest = {
     val fqnQuery = dbServiceName match {
-      case Some(service) => s"$service.*.$databaseName.*$tableName"
+      case Some(service) => s"$service.*$databaseName.*$tableName"
       case None => s"*$tableName"
     }
     createESRequest(fqnQuery, TABLE_SEARCH_INDEX)
@@ -95,10 +98,9 @@ object test {
   }
 
   private def createHttpRequest(path: String, queryParams: Map[String, String]): HttpRequest = {
-    val baseUri = new URI("http://172.16.0.179:8585")
+    val baseUri = new URI("http://192.168.149.66:28585")
     val fullUrl = s"${baseUri.getScheme}://${baseUri.getHost}:${baseUri.getPort}/$path"
     var request = Http(fullUrl).params(queryParams).header("Accept", "application/json").header("Content-Type", "application/json")
-    request = request.header("Authorization",  "eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImxpbmVhZ2UtYm90Iiwicm9sZXMiOlsiTGluZWFnZUJvdFJvbGUiXSwiZW1haWwiOiJsaW5lYWdlLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM2OTUwNTYsImV4cCI6bnVsbH0.N4hARFRrfI06NVZGJIYg_bEg2WY-Z4AoITdVScstxG0NEcU_17zsP1yyO05OqH867QeEqKczu1pZ4XUU1DmR7INxhd3gyF5peO94K8tRjpWcOIxQQdyTGPRy_SfBapRiNhND5OHEAk2aq_z4mBKmnP83Kwq0jwdKhE9xz7_PFtRhGN1vdEzPuOL-6A-WKjh7Y3ixyHqOdbyPfm-XDth2yPShqJ_gNArvWhBkOZxvbpylE6eOFDj__woChwB6dtpYAVwXHP7MGxTLUzBiyc8YQojfmO1hSRIu6hSXwntBqQlzyiyohwjmR3O6tgJrEkYou59tkfW_BuYo6jo_QJtDqQ")
     request
   }
 
@@ -110,7 +112,7 @@ object test {
     } catch {
       case e: Exception =>
         println(s"Failed to create/update pipeline pipeline_name in OpenMetadata: ", e)
-        throw new OpenLineageClientException(e)
+        ""
     }
   }
 
@@ -135,11 +137,13 @@ object test {
     try {
       val request = createPipelineServiceRequest()
       val response = sendRequest(request)
-      response.get("id").toString
+      val serviceId = response("id").toString
+      println(s"Successfully created/updated pipeline service with ID: $serviceId")
+      serviceId
     } catch {
       case e: Exception =>
         println(s"Failed to create/update service pipeline ${"pipeline_service"} in OpenMetadata: ", e)
-        throw new OpenLineageClientException(e)
+        ""
     }
   }
 
@@ -157,16 +161,32 @@ object test {
     createPutRequest("/api/v1/services/pipelineServices", jsonRequest)
   }
 
-  def toJsonString(obj: AnyRef): String = JSON.toJSONString(obj)
+
 
   def createPutRequest(path: String, jsonRequest: String): HttpRequest = {
-    val fullUrl = s"http://172.16.0.179:8585$path"
+    val fullUrl = s"http://192.168.149.66:28585$path"
     Http(fullUrl).put(jsonRequest).header("Content-Type", "application/json")
+  }
+
+  private def sendSearchRequest(request: HttpRequest): JSONObject = {
+    Try {
+      val response = request.header("Authorization", s"Bearer eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImluZ2VzdGlvbi1ib3QiLCJyb2xlcyI6WyJJbmdlc3Rpb25Cb3RSb2xlIl0sImVtYWlsIjoiaW5nZXN0aW9uLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM5NzYzNTcsImV4cCI6bnVsbH0.wtVY2Ez3Qo3X7lSUhAQkvh39S6yOvLBm9w3xzX8p4LRaZlk7LssF_Eh7ujJljK3oc19802ggRQnRSKqqQmqXrS1LaG2CL4cDmEf9LERLxAdOPFzX8GrGVXYsWwXWR-C_NKC1KiBcP7kE5opLodCimRZf4sqy5O4evHU8RFTOAa_iG4je1xD_LxdjA31oLiU-q-i7SyaWNvMOszCGDkN8V5iz3NatB7XHu5r_tL7amZI_LC-_9OM1WJUYfoz9yzcYGFoX-5ySnbSLhHVZK0jVcqqHu51F4lS-qeSIjAbzqqx2_-i5uHQmZPaFyAcAayuC8e99cxMVLgvqkdMVh9jQKQ").asString
+      if (response.isSuccess) {
+        JSON.parseObject(response.body)
+      } else {
+        throw new RuntimeException(s"HTTP search request failed with status: ${response.code}")
+      }
+    } match {
+      case Success(result) => result
+      case Failure(exception) =>
+        println(s"Failed to send search HTTP request: ${exception.getMessage}")
+        throw exception
+    }
   }
 
   private def sendRequest(request: HttpRequest): Map[String, Any] = {
     Try {
-      val response = request.header("Authorization", s"Bearer eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImxpbmVhZ2UtYm90Iiwicm9sZXMiOlsiTGluZWFnZUJvdFJvbGUiXSwiZW1haWwiOiJsaW5lYWdlLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM2OTUwNTYsImV4cCI6bnVsbH0.N4hARFRrfI06NVZGJIYg_bEg2WY-Z4AoITdVScstxG0NEcU_17zsP1yyO05OqH867QeEqKczu1pZ4XUU1DmR7INxhd3gyF5peO94K8tRjpWcOIxQQdyTGPRy_SfBapRiNhND5OHEAk2aq_z4mBKmnP83Kwq0jwdKhE9xz7_PFtRhGN1vdEzPuOL-6A-WKjh7Y3ixyHqOdbyPfm-XDth2yPShqJ_gNArvWhBkOZxvbpylE6eOFDj__woChwB6dtpYAVwXHP7MGxTLUzBiyc8YQojfmO1hSRIu6hSXwntBqQlzyiyohwjmR3O6tgJrEkYou59tkfW_BuYo6jo_QJtDqQ").asString
+      val response = request.header("Authorization", s"Bearer eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImluZ2VzdGlvbi1ib3QiLCJyb2xlcyI6WyJJbmdlc3Rpb25Cb3RSb2xlIl0sImVtYWlsIjoiaW5nZXN0aW9uLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM5NzYzNTcsImV4cCI6bnVsbH0.wtVY2Ez3Qo3X7lSUhAQkvh39S6yOvLBm9w3xzX8p4LRaZlk7LssF_Eh7ujJljK3oc19802ggRQnRSKqqQmqXrS1LaG2CL4cDmEf9LERLxAdOPFzX8GrGVXYsWwXWR-C_NKC1KiBcP7kE5opLodCimRZf4sqy5O4evHU8RFTOAa_iG4je1xD_LxdjA31oLiU-q-i7SyaWNvMOszCGDkN8V5iz3NatB7XHu5r_tL7amZI_LC-_9OM1WJUYfoz9yzcYGFoX-5ySnbSLhHVZK0jVcqqHu51F4lS-qeSIjAbzqqx2_-i5uHQmZPaFyAcAayuC8e99cxMVLgvqkdMVh9jQKQ").asString
       if (response.isSuccess) {
         val jsonResponse = JSON.parseObject(response.body)
         Map("id" -> jsonResponse.getString("id"))
@@ -177,24 +197,6 @@ object test {
       case Success(result) => result
       case Failure(exception) =>
         println(s"Failed to send HTTP request: ${exception.getMessage}")
-        throw exception
-    }
-  }
-
-  private def sendSearchRequest(request: HttpRequest): Map[String, Any] = {
-    Try {
-      val response = request.header("Authorization", s"Bearer eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImxpbmVhZ2UtYm90Iiwicm9sZXMiOlsiTGluZWFnZUJvdFJvbGUiXSwiZW1haWwiOiJsaW5lYWdlLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM2OTUwNTYsImV4cCI6bnVsbH0.N4hARFRrfI06NVZGJIYg_bEg2WY-Z4AoITdVScstxG0NEcU_17zsP1yyO05OqH867QeEqKczu1pZ4XUU1DmR7INxhd3gyF5peO94K8tRjpWcOIxQQdyTGPRy_SfBapRiNhND5OHEAk2aq_z4mBKmnP83Kwq0jwdKhE9xz7_PFtRhGN1vdEzPuOL-6A-WKjh7Y3ixyHqOdbyPfm-XDth2yPShqJ_gNArvWhBkOZxvbpylE6eOFDj__woChwB6dtpYAVwXHP7MGxTLUzBiyc8YQojfmO1hSRIu6hSXwntBqQlzyiyohwjmR3O6tgJrEkYou59tkfW_BuYo6jo_QJtDqQ").asString
-      if (response.isSuccess) {
-        val jsonResponse = JSON.parseObject(response.body)
-        // 将 JSONObject 转换为 Map
-        jsonResponse.asScala.toMap
-      } else {
-        throw new RuntimeException(s"HTTP search request failed with status: ${response.code}")
-      }
-    } match {
-      case Success(result) => result
-      case Failure(exception) =>
-        println(s"Failed to send search HTTP request: ${exception.getMessage}")
         throw exception
     }
   }
@@ -267,7 +269,7 @@ object test {
       "type" -> "pipelineService",
       "name" -> "pipeline_service",
       "fullyQualifiedName" -> "pipeline_service",
-      "href" -> s"http://172.16.0.179:8585/api/v1/services/pipelineServices/${pipserviceId}",
+      "href" -> s"http://192.168.149.66:28585/api/v1/services/pipelineServices/${pipserviceId}",
       "deleted" -> false,
       "inherited" -> true
     )
@@ -409,6 +411,10 @@ object test {
         println(s"降级方案也失败了: ${e.getMessage}")
         List.empty[Map[String, Any]]
     }
+  }
+  def toJsonString(obj: AnyRef): String = {
+    import com.alibaba.fastjson2.JSONWriter
+    JSON.toJSONString(obj, Array.empty[JSONWriter.Feature]: _*)
   }
 
   private def buildAttributeMap(attributesJson: com.alibaba.fastjson2.JSONArray): Map[String, String] = {
