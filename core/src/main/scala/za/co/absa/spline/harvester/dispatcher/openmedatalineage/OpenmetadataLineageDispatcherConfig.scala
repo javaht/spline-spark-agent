@@ -19,7 +19,7 @@ package za.co.absa.spline.harvester.dispatcher.openmedatalineage
 
 import org.apache.commons.configuration.Configuration
 import za.co.absa.spline.commons.config.ConfigurationImplicits._
-import za.co.absa.spline.harvester.dispatcher.openmedatalineage.OpenmetadataLineageDispatcherConfig.{database_ServiceNames, host_Port, jwt_Token, pipeline_Description, pipeline_Name, pipeline_ServiceName, pipeline_SourceUrl}
+import za.co.absa.spline.harvester.dispatcher.openmedatalineage.OpenmetadataLineageDispatcherConfig.{host_Port, jwt_Token, pipeline_Description, pipeline_Name, pipeline_ServiceName, pipeline_SourceUrl}
 
 object OpenmetadataLineageDispatcherConfig {
   val host_Port = "hostPort"
@@ -28,7 +28,6 @@ object OpenmetadataLineageDispatcherConfig {
 
   val pipeline_SourceUrl="pipelineSourceUrl"
   val pipeline_ServiceName="pipelineServiceName"
-  val database_ServiceNames="databaseServiceNames"
   val pipeline_Description="pipelineDescription"
 
 
@@ -43,7 +42,6 @@ class OpenmetadataLineageDispatcherConfig(config: Configuration) {
 
   val pipelineSourceUrl: String = config.getRequiredString(pipeline_SourceUrl)
   val pipelineServiceName: String = config.getRequiredString(pipeline_ServiceName)
-  val databaseServiceNames: String = config.getRequiredString(database_ServiceNames)
   val pipelineDescription: String = config.getRequiredString(pipeline_Description)
 
 

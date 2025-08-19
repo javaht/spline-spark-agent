@@ -46,18 +46,6 @@ class OpenmetadataLineageDispatcher(
   private var databasenames: List[String] = List.empty[String]
   override def name = "Openmetadata"
 
-  if (config.databaseServiceNames != null) {
-    try {
-      databasenames=config.databaseServiceNames.split(",").toList
-    } catch {
-      case e: Exception =>
-        log.error("failed to emit fetch database service names: {}", e.getMessage, e)
-        List.empty[String]
-    }
-  } else {
-    databasenames= List.empty[String]
-  }
-
 
 
   override protected def send(data: String): Unit = {
