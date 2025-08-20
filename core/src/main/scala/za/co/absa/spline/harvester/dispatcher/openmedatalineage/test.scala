@@ -8,6 +8,7 @@ import java.util
 import scala.util.{Failure, Success, Try}
 import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 
 
 
@@ -18,7 +19,7 @@ object test {
 
   def main(args: Array[String]): Unit = {
     // 读取 xueyuan.txt 文件中的 JSON 数据
-    val source = scala.io.Source.fromFile("core/src/main/scala/za/co/absa/spline/harvester/dispatcher/openmedatalineage/xueyuan.txt")
+    val source = scala.io.Source.fromFile("/Users/zhouzhou/IdeaProjects/gouzheng/spline-spark-agent/core/src/main/scala/za/co/absa/spline/harvester/dispatcher/openmedatalineage/xueyuan.txt")
     val data = try source.mkString finally source.close()
     
     val jsonData = StringUtils.replace(data, "ExecutionPlan (apiVersion: 1.2):", "")
@@ -98,7 +99,7 @@ object test {
   }
 
   private def createHttpRequest(path: String, queryParams: Map[String, String]): HttpRequest = {
-    val baseUri = new URI("http://192.168.149.66:28585")
+    val baseUri = new URI("http://172.16.0.179:8585")
     val fullUrl = s"${baseUri.getScheme}://${baseUri.getHost}:${baseUri.getPort}/$path"
     var request = Http(fullUrl).params(queryParams).header("Accept", "application/json").header("Content-Type", "application/json")
     request
@@ -164,13 +165,13 @@ object test {
 
 
   def createPutRequest(path: String, jsonRequest: String): HttpRequest = {
-    val fullUrl = s"http://192.168.149.66:28585$path"
+    val fullUrl = s"http://172.16.0.179:8585$path"
     Http(fullUrl).put(jsonRequest).header("Content-Type", "application/json")
   }
 
   private def sendSearchRequest(request: HttpRequest): JSONObject = {
     Try {
-      val response = request.header("Authorization", s"Bearer eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImluZ2VzdGlvbi1ib3QiLCJyb2xlcyI6WyJJbmdlc3Rpb25Cb3RSb2xlIl0sImVtYWlsIjoiaW5nZXN0aW9uLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM5NzYzNTcsImV4cCI6bnVsbH0.wtVY2Ez3Qo3X7lSUhAQkvh39S6yOvLBm9w3xzX8p4LRaZlk7LssF_Eh7ujJljK3oc19802ggRQnRSKqqQmqXrS1LaG2CL4cDmEf9LERLxAdOPFzX8GrGVXYsWwXWR-C_NKC1KiBcP7kE5opLodCimRZf4sqy5O4evHU8RFTOAa_iG4je1xD_LxdjA31oLiU-q-i7SyaWNvMOszCGDkN8V5iz3NatB7XHu5r_tL7amZI_LC-_9OM1WJUYfoz9yzcYGFoX-5ySnbSLhHVZK0jVcqqHu51F4lS-qeSIjAbzqqx2_-i5uHQmZPaFyAcAayuC8e99cxMVLgvqkdMVh9jQKQ").asString
+      val response = request.header("Authorization", s"Bearer eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImxpbmVhZ2UtYm90Iiwicm9sZXMiOlsiTGluZWFnZUJvdFJvbGUiXSwiZW1haWwiOiJsaW5lYWdlLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM2OTUwNTYsImV4cCI6bnVsbH0.N4hARFRrfI06NVZGJIYg_bEg2WY-Z4AoITdVScstxG0NEcU_17zsP1yyO05OqH867QeEqKczu1pZ4XUU1DmR7INxhd3gyF5peO94K8tRjpWcOIxQQdyTGPRy_SfBapRiNhND5OHEAk2aq_z4mBKmnP83Kwq0jwdKhE9xz7_PFtRhGN1vdEzPuOL-6A-WKjh7Y3ixyHqOdbyPfm-XDth2yPShqJ_gNArvWhBkOZxvbpylE6eOFDj__woChwB6dtpYAVwXHP7MGxTLUzBiyc8YQojfmO1hSRIu6hSXwntBqQlzyiyohwjmR3O6tgJrEkYou59tkfW_BuYo6jo_QJtDqQ").asString
       if (response.isSuccess) {
         JSON.parseObject(response.body)
       } else {
@@ -186,7 +187,7 @@ object test {
 
   private def sendRequest(request: HttpRequest): Map[String, Any] = {
     Try {
-      val response = request.header("Authorization", s"Bearer eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImluZ2VzdGlvbi1ib3QiLCJyb2xlcyI6WyJJbmdlc3Rpb25Cb3RSb2xlIl0sImVtYWlsIjoiaW5nZXN0aW9uLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM5NzYzNTcsImV4cCI6bnVsbH0.wtVY2Ez3Qo3X7lSUhAQkvh39S6yOvLBm9w3xzX8p4LRaZlk7LssF_Eh7ujJljK3oc19802ggRQnRSKqqQmqXrS1LaG2CL4cDmEf9LERLxAdOPFzX8GrGVXYsWwXWR-C_NKC1KiBcP7kE5opLodCimRZf4sqy5O4evHU8RFTOAa_iG4je1xD_LxdjA31oLiU-q-i7SyaWNvMOszCGDkN8V5iz3NatB7XHu5r_tL7amZI_LC-_9OM1WJUYfoz9yzcYGFoX-5ySnbSLhHVZK0jVcqqHu51F4lS-qeSIjAbzqqx2_-i5uHQmZPaFyAcAayuC8e99cxMVLgvqkdMVh9jQKQ").asString
+      val response = request.header("Authorization", s"Bearer eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImxpbmVhZ2UtYm90Iiwicm9sZXMiOlsiTGluZWFnZUJvdFJvbGUiXSwiZW1haWwiOiJsaW5lYWdlLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NTM2OTUwNTYsImV4cCI6bnVsbH0.N4hARFRrfI06NVZGJIYg_bEg2WY-Z4AoITdVScstxG0NEcU_17zsP1yyO05OqH867QeEqKczu1pZ4XUU1DmR7INxhd3gyF5peO94K8tRjpWcOIxQQdyTGPRy_SfBapRiNhND5OHEAk2aq_z4mBKmnP83Kwq0jwdKhE9xz7_PFtRhGN1vdEzPuOL-6A-WKjh7Y3ixyHqOdbyPfm-XDth2yPShqJ_gNArvWhBkOZxvbpylE6eOFDj__woChwB6dtpYAVwXHP7MGxTLUzBiyc8YQojfmO1hSRIu6hSXwntBqQlzyiyohwjmR3O6tgJrEkYou59tkfW_BuYo6jo_QJtDqQ").asString
       if (response.isSuccess) {
         val jsonResponse = JSON.parseObject(response.body)
         Map("id" -> jsonResponse.getString("id"))
@@ -222,10 +223,9 @@ object test {
         val sourceDatabase = getStringValue(readObj, "params.table.identifier.database")
         println(s"源${i + 1}信息 - 类型: '$sourceType', 数据库: '$sourceDatabase', 表: '$sourceTable'")
         val sourceEntity: Map[String, JSONObject] = getEntity(sourceType, sourceDatabase, sourceTable)
-
+        var lineageRequest :HttpRequest = null
         if (sourceEntity.nonEmpty && targetEntity.nonEmpty) {
-          val lineageRequest = createLineageRequest(pipserviceId, sourceEntity, targetEntity, jsonData, i)
-
+           lineageRequest = createLineageRequest(pipserviceId, sourceEntity, targetEntity, jsonData, i)
           try {
             val response = sendRequest(lineageRequest)
             println(s"Successfully created lineage from $sourceTable to $targetTableName")
@@ -248,48 +248,50 @@ object test {
     val fromEntityJson = fromEntity.values.head
     val toEntityJson = toEntity.values.head
 
-    val edgeMap = Map(
-      "toEntity" -> convertJSONObjectToMap(toEntityJson),
-      "fromEntity" -> convertJSONObjectToMap(fromEntityJson),
-      "lineageDetails" -> Map(
-        "pipeline" -> createPipelineEntityMap(pipserviceId),
-        "source" -> SPARK_LINEAGE_SOURCE,
-        "columnsLineage" -> getColumnLevelLineage(jsonData, fromEntityJson.getString("fullyQualifiedName"), toEntityJson.getString("fullyQualifiedName"), sourceIndex)
-      )
-    )
+    // 使用 Java HashMap 确保正确的 JSON 序列化
+    val lineageDetailsMap = new java.util.HashMap[String, Any]()
+    lineageDetailsMap.put("pipeline", createPipelineEntityMap(pipserviceId))
+    lineageDetailsMap.put("source", SPARK_LINEAGE_SOURCE)
+    lineageDetailsMap.put("columnsLineage", getColumnLevelLineage(jsonData, fromEntityJson.getString("fullyQualifiedName"), toEntityJson.getString("fullyQualifiedName"), sourceIndex))
+    val edgeMap = new java.util.HashMap[String, Any]()
+    edgeMap.put("toEntity", convertJSONObjectToMap(toEntityJson))
+    edgeMap.put("fromEntity", convertJSONObjectToMap(fromEntityJson))
+    edgeMap.put("lineageDetails", lineageDetailsMap)
 
-    val requestMap = Map("edge" -> edgeMap)
+    val requestMap = new java.util.HashMap[String, Any]()
+    requestMap.put("edge", edgeMap)
     val jsonRequest = toJsonString(requestMap)
+
     createPutRequest("/api/v1/lineage", jsonRequest)
   }
 
-  private def createPipelineEntityMap(pipserviceId: String): Map[String, Any] = {
-    Map(
-      "id" -> pipserviceId,
-      "type" -> "pipelineService",
-      "name" -> "pipeline_service",
-      "fullyQualifiedName" -> "pipeline_service",
-      "href" -> s"http://192.168.149.66:28585/api/v1/services/pipelineServices/${pipserviceId}",
-      "deleted" -> false,
-      "inherited" -> true
-    )
+  private def createPipelineEntityMap(pipserviceId: String): java.util.HashMap[String, Any] = {
+    val map = new java.util.HashMap[String, Any]()
+    map.put("id", pipserviceId)
+    map.put("type", "pipelineService")
+    map.put("name", "pipeline_service")
+    map.put("fullyQualifiedName", "pipeline_service")
+    map.put("href", s"http://172.16.0.179:8585/api/v1/services/pipelineServices/${pipserviceId}")
+    map.put("deleted", java.lang.Boolean.valueOf(false))
+    map.put("inherited", java.lang.Boolean.valueOf(true))
+    map
   }
 
-  private def convertJSONObjectToMap(jsonObject: JSONObject): Map[String, Any] = {
-    Map(
-      "id" -> jsonObject.getString("id"),
-      "name" -> jsonObject.getString("name"),
-      "fullyQualifiedName" -> jsonObject.getString("fullyQualifiedName"),
-      "deleted" -> jsonObject.getBoolean("deleted"),
-      "description" -> jsonObject.getString("description"),
-      "displayName" -> jsonObject.getString("displayName"),
-      "href" -> jsonObject.getString("href"),
-      "inherited" -> jsonObject.getBoolean("inherited"),
-      "type" -> jsonObject.getString("type")
-    )
+  private def convertJSONObjectToMap(jsonObject: JSONObject): java.util.HashMap[String, Any] = {
+    val map = new java.util.HashMap[String, Any]()
+    map.put("id", jsonObject.getString("id"))
+    map.put("name", jsonObject.getString("name"))
+    map.put("fullyQualifiedName", jsonObject.getString("fullyQualifiedName"))
+    map.put("deleted", jsonObject.getBoolean("deleted"))
+    map.put("description", jsonObject.getString("description"))
+    map.put("displayName", jsonObject.getString("displayName"))
+    map.put("href", jsonObject.getString("href"))
+    map.put("inherited", jsonObject.getBoolean("inherited"))
+    map.put("type", jsonObject.getString("type"))
+    map
   }
 
-  private def getColumnLevelLineage(jsonData: String, sourceTableFqn: String, targetTableFqn: String, sourceIndex: Int): List[Map[String, Any]] = {
+  private def getColumnLevelLineage(jsonData: String, sourceTableFqn: String, targetTableFqn: String, sourceIndex: Int): List[java.util.HashMap[String, Any]] = {
     try {
       val json = JSON.parseObject(jsonData)
       val operations = json.getJSONObject("operations")
@@ -297,56 +299,65 @@ object test {
       val write = operations.getJSONObject("write")
       val attributeMap = buildAttributeMap(json.getJSONArray("attributes"))
       val otherOps = operations.getJSONArray("other")
-
-      val lineageResults = mutable.ListBuffer[Map[String, Any]]()
+      
+      val lineResults = new ListBuffer[java.util.HashMap[String, Any]]
 
       if (reads != null && reads.size() > sourceIndex) {
-        // 获取指定索引的源表的输出列
         val currentRead = reads.getJSONObject(sourceIndex)
-        val sourceOutputAttrs = Option(currentRead.getJSONArray("output")).map(_.asScala.toList.map(_.toString)).getOrElse(List.empty)
-
-        // 获取最终写入操作的输入列（这些是实际写入目标表的列）
+        val sourceOutputAttrs = if (currentRead.getJSONArray("output") != null) {
+          currentRead.getJSONArray("output").asScala.toList.map(_.toString)
+        } else {
+          List.empty[String]
+        }
         val writeInputAttrs = getWriteInputAttributes(write, otherOps)
-
-        // 构建列级血缘关系
         val columnMappings = traceColumnLineage(sourceOutputAttrs, writeInputAttrs, otherOps, attributeMap)
-
-        columnMappings.foreach { case (sourceAttrs, targetAttr) =>
+        
+        val mappingIterator = columnMappings.iterator
+        while (mappingIterator.hasNext) {
+          val mapping = mappingIterator.next()
+          val sourceAttrs = mapping._1
+          val targetAttr = mapping._2
+          
           val sourceColumns = sourceAttrs.map(attrId => {
             val columnName = attributeMap.getOrElse(attrId, attrId)
             s"$sourceTableFqn.$columnName"
           })
+          
           val targetColumnName = attributeMap.getOrElse(targetAttr, targetAttr)
-
-          lineageResults += Map(
-            "fromColumns" -> sourceColumns,
-            "toColumn" -> s"$targetTableFqn.$targetColumnName"
-          )
+          val lineageMap = new java.util.HashMap[String, Any]()
+          val fromColumnsArray = new java.util.ArrayList[String]()
+          
+          val columnsIterator = sourceColumns.iterator
+          while (columnsIterator.hasNext) {
+            fromColumnsArray.add(columnsIterator.next())
+          }
+          
+          lineageMap.put("fromColumns", fromColumnsArray)
+          lineageMap.put("toColumn", s"$targetTableFqn.$targetColumnName")
+          lineResults.append(lineageMap)
         }
       }
-
-      println(s"Generated ${lineageResults.size} column lineage entries for source table index $sourceIndex")
-      lineageResults.toList
+      
+      val resultList = lineResults.toList
+      println(s"Generated ${resultList.size} column lineage entries for source table index $sourceIndex")
+      resultList
     } catch {
       case e: Exception =>
         println(s"Failed to parse column level lineage: ${e.getMessage}")
-        fallbackToSimpleMapping(jsonData, sourceTableFqn, targetTableFqn, sourceIndex)
+        List.empty[java.util.HashMap[String, Any]]
     }
   }
 
   private def getWriteInputAttributes(write: JSONObject, otherOps: com.alibaba.fastjson2.JSONArray): List[String] = {
-    // 从写操作的子操作中获取输入属性
     val childIds = Option(write.getJSONArray("childIds"))
       .map(_.asScala.toList.map(_.toString))
       .getOrElse(List.empty)
 
     if (childIds.nonEmpty && otherOps != null) {
-      // 找到写操作的直接子操作
       val directChild = otherOps.asScala.find { op =>
         val opObj = op.asInstanceOf[JSONObject]
         childIds.contains(opObj.getString("id"))
       }
-
       directChild match {
         case Some(childOp) =>
           val childOpObj = childOp.asInstanceOf[JSONObject]
@@ -366,55 +377,25 @@ object test {
     otherOps: com.alibaba.fastjson2.JSONArray,
     attributeMap: Map[String, String]
   ): List[(List[String], String)] = {
-
-    // 简化版本：假设列的顺序对应关系
-    // 在实际实现中，需要分析 Project 操作的 projectList 来建立精确映射
-    val mappings = mutable.ListBuffer[(List[String], String)]()
-
+    
+    val mappings = new ListBuffer[(List[String], String)]
     val minSize = Math.min(sourceAttrs.size, targetAttrs.size)
-    for (i <- 0 until minSize) {
-      mappings += ((List(sourceAttrs(i)), targetAttrs(i)))
+    
+    var i = 0
+    while (i < minSize) {
+      val sourceAttr = sourceAttrs(i)
+      val targetAttr = targetAttrs(i)
+      mappings.append((List(sourceAttr), targetAttr))
+      i += 1
     }
-
+    
     mappings.toList
   }
 
-  private def fallbackToSimpleMapping(jsonData: String, sourceTableFqn: String, targetTableFqn: String, sourceIndex: Int): List[Map[String, Any]] = {
-    try {
-      val json = JSON.parseObject(jsonData)
-      val operations = json.getJSONObject("operations")
-      val reads = operations.getJSONArray("reads")
-      val attributeMap = buildAttributeMap(json.getJSONArray("attributes"))
-
-      val lineageResults = mutable.ListBuffer[Map[String, Any]]()
-
-      if (reads != null && reads.size() > sourceIndex) {
-        val currentRead = reads.getJSONObject(sourceIndex)
-        val readOutputAttrs = Option(currentRead.getJSONArray("output"))
-          .map(_.asScala.toList.map(_.toString))
-          .getOrElse(List.empty)
-
-        readOutputAttrs.foreach { attrId =>
-          val columnName = attributeMap.getOrElse(attrId, attrId)
-
-          lineageResults += Map(
-            "fromColumns" -> List(s"$sourceTableFqn.$columnName"),
-            "toColumn" -> s"$targetTableFqn.$columnName"
-          )
-        }
-      }
-
-      println(s"使用简单列映射作为降级方案 (源表索引: $sourceIndex)")
-      lineageResults.toList
-    } catch {
-      case e: Exception =>
-        println(s"降级方案也失败了: ${e.getMessage}")
-        List.empty[Map[String, Any]]
-    }
-  }
   def toJsonString(obj: AnyRef): String = {
     import com.alibaba.fastjson2.JSONWriter
-    JSON.toJSONString(obj, Array.empty[JSONWriter.Feature]: _*)
+    // 使用 WriteMapNullValue 确保正确序列化
+    JSON.toJSONString(obj, JSONWriter.Feature.WriteMapNullValue)
   }
 
   private def buildAttributeMap(attributesJson: com.alibaba.fastjson2.JSONArray): Map[String, String] = {
