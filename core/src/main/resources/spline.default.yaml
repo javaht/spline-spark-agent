@@ -99,6 +99,15 @@ spline:
       # topic name
       topic:
 
+    openmetadata:
+      className: za.co.absa.spline.harvester.dispatcher.OpenmetadataLineageDispatcher
+      hostPort:
+      jwtToken:
+      pipelineName:
+      pipelineSourceUrl:
+      pipelineServiceName:
+      pipelineDescription:
+
     # -------------------------------------------
     # Console dispatcher
     # -------------------------------------------

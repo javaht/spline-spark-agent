@@ -86,8 +86,8 @@ class DorisPlugin
    */
   override val readNodeProcessor: PartialFunction[LogicalPlan, ReadNodeInfo] = {
     case plan if isDorisV2ReadPlan(plan) =>
-      log.info(s"✅ Detected Doris READ_V2 operation - Class: ${plan.getClass.getSimpleName}")
-      // 对于V2操作，我们使用简化的处理方式
+      log.info(s" Detected Doris READ_V2 operation - Class: ${plan.getClass.getSimpleName}")
+      // 对于V2操作，使用简化的处理方式
       ReadNodeInfo(DorisPlugin.asSourceId("unknown", "unknown"), Map("plan_type" -> plan.getClass.getSimpleName))
   }
 
@@ -96,7 +96,7 @@ class DorisPlugin
    */
   override val writeNodeProcessor: PartialFunction[(SplineAgent.FuncName, LogicalPlan), WriteNodeInfo] = {
     case (_, plan) if isDorisV2WritePlan(plan) =>
-      log.info(s"✅ Detected Doris WRITE_V2 operation - Class: ${plan.getClass.getSimpleName}")
+      log.info(s" Detected Doris WRITE_V2 operation - Class: ${plan.getClass.getSimpleName}")
       
       // 尝试从LogicalPlan中提取数据库和表信息
       val (database, table, fenodes) = extractV2WriteMetadata(plan)
