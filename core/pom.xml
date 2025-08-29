@@ -156,14 +156,8 @@
             <artifactId>spark-cobol_${scala.binary.version}</artifactId>
             <optional>true</optional>
         </dependency>
-        <dependency>
-            <groupId>com.google.code.gson</groupId>
-            <artifactId>gson</artifactId>
-            <version>2.12.1</version>
-        </dependency>
 
         <!-- Test scope -->
-
         <dependency>
             <groupId>za.co.absa.commons</groupId>
             <artifactId>scalatest-extras_${scala.binary.version}</artifactId>
