@@ -30,7 +30,7 @@ import za.co.absa.spline.harvester.plugin.{BaseRelationProcessing, DataSourceFor
 import za.co.absa.spline.agent.SplineAgent
 import javax.annotation.Priority
 import scala.util.{Try}
-
+import org.slf4j.LoggerFactory
 
 
 @Priority(Precedence.Highest)
@@ -42,7 +42,7 @@ class DorisPlugin
     with WriteNodeProcessing
     with ReadNodeProcessing {
 
-  import org.slf4j.LoggerFactory
+
   private val log = LoggerFactory.getLogger(classOf[DorisPlugin])
 
   /**
@@ -50,7 +50,7 @@ class DorisPlugin
    */
   override def baseRelationProcessor: PartialFunction[(BaseRelation, LogicalRelation), ReadNodeInfo] = {
     case (`_: DorisRelation`(dorisRelation), _) =>
-      log.info("开始处理传统的Doris读操作")
+      log.info("开始处理传统的Doris读操作",dorisRelation.toString)
       Try {
         log.debug("尝试从DorisRelation中提取数据库和表信息")
         val database = extractValue[String](dorisRelation, "database")
@@ -62,6 +62,7 @@ class DorisPlugin
         log.debug(s"连接参数: $params")
 
         log.info("成功创建Doris读操作的ReadNodeInfo")
+        log.info("这个是ReadNodeInfo", ReadNodeInfo(DorisPlugin.asSourceId(database, table), params))
         ReadNodeInfo(DorisPlugin.asSourceId(database, table), params)
       }.recover {
         case ex =>
@@ -76,7 +77,7 @@ class DorisPlugin
    */
   override def relationProviderProcessor: PartialFunction[(AnyRef, SaveIntoDataSourceCommand), WriteNodeInfo] = {
     case (rp, cmd) if isDorisProvider(rp) =>
-      log.info("开始处理传统的Doris写操作")
+      log.info("开始处理传统的Doris写操作",rp.toString)
       log.debug(s"检测到Doris提供者: $rp")
       Try {
         log.debug("从命令选项中提取数据库和表信息")
@@ -90,6 +91,7 @@ class DorisPlugin
         log.debug(s"增强选项: $enhancedOptions")
 
         log.info("成功创建Doris写操作的WriteNodeInfo")
+        log.info("WriteNodeInfo,",WriteNodeInfo(DorisPlugin.asSourceIdWithFenodes(fenodes, database, table), cmd.mode, cmd.query, enhancedOptions).toString)
         WriteNodeInfo(DorisPlugin.asSourceIdWithFenodes(fenodes, database, table), cmd.mode, cmd.query, enhancedOptions)
       }.recover {
         case ex =>
@@ -107,7 +109,7 @@ class DorisPlugin
    */
   override def writeNodeProcessor: PartialFunction[(SplineAgent.FuncName, LogicalPlan), WriteNodeInfo] = {
     case (_, cmd: SaveIntoDataSourceCommand) if isDorisSaveCommand(cmd) =>
-      log.info("通过writeNodeProcessor处理Doris SaveIntoDataSourceCommand")
+      log.info("通过writeNodeProcessor处理Doris SaveIntoDataSourceCommand",cmd.toString)
       log.debug(s"命令选项: ${cmd.options}")
 
       Try {
@@ -121,7 +123,7 @@ class DorisPlugin
         val enhancedOptions = cmd.options ++ createTableIdentifier(database, table)
         log.debug(s"增强选项: $enhancedOptions")
 
-        log.info("成功创建Doris写操作的WriteNodeInfo")
+        log.info("成功创建Doris写操作的WriteNodeInfo",WriteNodeInfo(DorisPlugin.asSourceIdWithFenodes(fenodes, database, table), cmd.mode, cmd.query, enhancedOptions))
         WriteNodeInfo(DorisPlugin.asSourceIdWithFenodes(fenodes, database, table), cmd.mode, cmd.query, enhancedOptions)
       }.recover {
         case ex =>
@@ -134,7 +136,7 @@ class DorisPlugin
       }.get
 
     case (_, plan) if isDorisV2WritePlan(plan) =>
-      log.info(s"检测到Doris WRITE_V2操作 - 类名: ${plan.getClass.getSimpleName}")
+      log.info(s"检测到Doris WRITE_V2操作 - 类名: ${plan.getClass.getSimpleName}",plan.toString)
       log.debug(s"计划详情: $plan")
 
       // 尝试从LogicalPlan中提取数据库和表信息
@@ -216,6 +218,7 @@ class DorisPlugin
   private object RelationProviderExtractor extends AccessorMethodValueExtractor[AnyRef]("provider", "dataSource")
 
   private def isDorisSaveCommand(cmd: SaveIntoDataSourceCommand): Boolean = {
+    log.info("isDorisSaveCommand->cmd",cmd.toString)
     val options = cmd.options
     // 检查选项中是否包含Doris特有的参数（支持多种命名方式）
     val hasDorisTableId = options.keys.exists(key =>
