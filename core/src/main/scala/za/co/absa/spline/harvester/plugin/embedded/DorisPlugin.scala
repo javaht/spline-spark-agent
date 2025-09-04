@@ -32,7 +32,7 @@ import scala.util.{Try}
 import org.slf4j.LoggerFactory
 
 
-@Priority(Precedence.Highest)
+@Priority(Precedence.Normal)
 class DorisPlugin
   extends Plugin
     with BaseRelationProcessing
@@ -314,13 +314,11 @@ object DorisPlugin {
 
   private def asSourceId(database: String, table: String): SourceIdentifier = {
     val sourceId = s"doris://$database/$table"
-    println(s"创建标准源标识符: $sourceId") // 使用println因为object中无法访问log
     SourceIdentifier(Some("doris"), sourceId)
   }
 
   private def asSourceIdWithFenodes(fenodes: String, database: String, table: String): SourceIdentifier = {
     val sourceId = s"doris://$fenodes/$database/$table"
-    println(s"创建带fenodes的源标识符: $sourceId") // 使用println因为object中无法访问log
     SourceIdentifier(Some("doris"), sourceId)
   }
 }
