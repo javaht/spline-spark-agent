@@ -74,41 +74,27 @@ class DorisPlugin
    */
   override def writeNodeProcessor: PartialFunction[(SplineAgent.FuncName, LogicalPlan), WriteNodeInfo] = {
     case (_, cmd: SaveIntoDataSourceCommand) if isDorisSaveCommand(cmd) =>
-      Try {
         val database = extractDatabaseFromOptions(cmd.options)
         val table = extractTableFromOptions(cmd.options)
         val fenodes = extractFenodesFromOptions(cmd.options)
         val enhancedOptions = cmd.options ++ createTableIdentifier(database, table)
-         WriteNodeInfo(DorisPlugin.asSourceIdWithFenodes(fenodes, database, table), cmd.mode, cmd.query, enhancedOptions)
-      }.recover {
-        case ex =>
-          log.error(s"提取Doris写操作元数据失败: ${ex.getMessage}", ex)
-          log.warn("使用备选方案创建WriteNodeInfo")
-          val fallbackDb = cmd.options.get("doris.table.identifier").map(_.split("\\.").headOption.getOrElse("unknown")).getOrElse("unknown")
-          val fallbackTable = cmd.options.get("doris.table.identifier").map(_.split("\\.").lastOption.getOrElse("unknown")).getOrElse("unknown")
-          log.info(s"使用备选值 - 数据库: $fallbackDb, 表: $fallbackTable")
-          WriteNodeInfo(DorisPlugin.asSourceId(fallbackDb, fallbackTable), cmd.mode, cmd.query, cmd.options)
-      }.get
+        WriteNodeInfo(DorisPlugin.asSourceIdWithFenodes(fenodes, database, table), cmd.mode, cmd.query, enhancedOptions)
 
-          case (_, plan) if isDorisV2WritePlan(plan) =>
-            log.info(s"检测到Doris WRITE_V2操作 - 类名: ${plan.getClass.getSimpleName}")
-            log.info(s"计划详情: $plan")
+      case (_, plan) if isDorisV2WritePlan(plan) =>
+        log.info(s"检测到Doris WRITE_V2操作 - 类名: ${plan.getClass.getSimpleName}")
+        val (database, table, fenodes) = extractV2WriteMetadata(plan)
+        log.info(s"提取到元数据 - 数据库: $database, 表: $table, fenodes: $fenodes")
+        val params = createTableIdentifier(database, table) ++ Map("plan_type" -> plan.getClass.getSimpleName)
+        val originalPlan = extractOriginalPlan(plan)
 
-            log.info("开始从V2计划中提取元数据")
-            val (database, table, fenodes) = extractV2WriteMetadata(plan)
-            log.info(s"提取到元数据 - 数据库: $database, 表: $table, fenodes: $fenodes")
-
-            val params = createTableIdentifier(database, table) ++ Map("plan_type" -> plan.getClass.getSimpleName)
-            log.info(s"参数映射: $params")
-
-            log.info("成功创建Doris V2写操作的WriteNodeInfo")
-            WriteNodeInfo(
-              srcId = if (fenodes != "unknown") DorisPlugin.asSourceIdWithFenodes(fenodes, database, table) else DorisPlugin.asSourceId(database, table),
-              saveMode = SaveMode.Overwrite,
-              logicalPlan = plan,
-              params = params
-            )
-  }
+        
+        WriteNodeInfo(
+          srcId = if (fenodes != "unknown") DorisPlugin.asSourceIdWithFenodes(fenodes, database, table) else DorisPlugin.asSourceId(database, table),
+          saveMode = SaveMode.Overwrite,
+          logicalPlan = originalPlan,
+          params = params
+        )
+}
 
   /**
    * 处理Doris V2读操作
@@ -122,11 +108,6 @@ class DorisPlugin
       ReadNodeInfo(DorisPlugin.asSourceId("unknown", "unknown"), Map("plan_type" -> plan.getClass.getSimpleName))
   }
 
-
-
-
-
-  // ========== 简化的辅助方法 ==========
 
   private def isDorisV2ReadPlan(plan: LogicalPlan): Boolean = {
     val className = plan.getClass.getSimpleName
@@ -146,7 +127,6 @@ class DorisPlugin
       case s: String if s.toLowerCase.contains("doris") => true
       case DorisSourceExtractor(_) => true
       case className: String =>
-        // 检查类名是否包含各种可能的Doris连接器类名模式
         val lowerClassName = className.toLowerCase
         lowerClassName.contains("doris") && (lowerClassName.contains("source") || lowerClassName.contains("provider") || lowerClassName.contains("connector"))
       case _ => false
@@ -160,36 +140,30 @@ class DorisPlugin
   private object RelationProviderExtractor extends AccessorMethodValueExtractor[AnyRef]("provider", "dataSource")
 
   private def isDorisSaveCommand(cmd: SaveIntoDataSourceCommand): Boolean = {
-    log.info("isDorisSaveCommand->cmd",cmd.toString)
     val options = cmd.options
-    // 检查选项中是否包含Doris特有的参数（支持多种命名方式）
-    val hasDorisTableId = options.keys.exists(key =>
-      key.toLowerCase.contains("doris") &&  (key.toLowerCase.contains("table") || key.toLowerCase.contains("identifier")))
 
-    val hasDorisFenodes = options.keys.exists(key =>
-      key.toLowerCase.contains("doris") && (key.toLowerCase.contains("fenodes") || key.toLowerCase.contains("fe") || key.toLowerCase.contains("host")))
+    log.info(s"开始打印options.keys: ${options.keys}")
+    val hasDorisTableId = options.keys.exists(key => key.toLowerCase.contains("doris") &&  (key.toLowerCase.contains("table") || key.toLowerCase.contains("identifier")))
 
-    val hasDorisWriteMode = options.keys.exists(key =>
-      key.toLowerCase.contains("doris") && key.toLowerCase.contains("write"))
+    val hasDorisFenodes = options.keys.exists(key => key.toLowerCase.contains("doris") && (key.toLowerCase.contains("fenodes") || key.toLowerCase.contains("fe") || key.toLowerCase.contains("host")))
 
-    val hasDorisConn = options.keys.exists(key =>
-      key.toLowerCase.contains("doris") && (key.toLowerCase.contains("conn") || key.toLowerCase.contains("url") || key.toLowerCase.contains("jdbc")))
+    val hasDorisWriteMode = options.keys.exists(key => key.toLowerCase.contains("doris") && key.toLowerCase.contains("write"))
 
-    val hasDorisUser = options.keys.exists(key =>
-      key.toLowerCase.contains("doris") && key.toLowerCase.contains("user"))
+    val hasDorisConn = options.keys.exists(key => key.toLowerCase.contains("doris") && (key.toLowerCase.contains("conn") || key.toLowerCase.contains("url") || key.toLowerCase.contains("jdbc")))
 
-    val hasDorisPassword = options.keys.exists(key =>
-      key.toLowerCase.contains("doris") && key.toLowerCase.contains("password"))
+    val hasDorisUser = options.keys.exists(key => key.toLowerCase.contains("doris") && key.toLowerCase.contains("user"))
+
+    val hasDorisPassword = options.keys.exists(key => key.toLowerCase.contains("doris") && key.toLowerCase.contains("password"))
 
     val hasPathWithDoris = options.get("path").exists(_.toLowerCase.contains("doris"))
+    log.info(s"开始打印options.path: ${options.get("path")}")
 
-    // 检查provider是否为Doris
     val isDorisProviderMatch = RelationProviderExtractor.unapply(cmd).exists(isDorisProvider)
 
-    // 检查format是否为doris
+    log.info(s"开始打印isDorisProviderMatch: $isDorisProviderMatch")
+
     val isDorisFormat = options.get("format").exists(_.toLowerCase.contains("doris"))
 
-    // 满足任一条件即认为是Doris相关操作
     hasDorisTableId || hasDorisFenodes || hasDorisWriteMode || hasDorisConn || hasDorisUser || hasDorisPassword || hasPathWithDoris || isDorisProviderMatch || isDorisFormat
   }
 
@@ -280,11 +254,6 @@ class DorisPlugin
     log.info("开始从V2写操作中提取元数据")
     Try {
       val planString = plan.toString
-      log.info(s"从V2计划中提取元数据: $planString")
-
-      // 尝试使用反射从plan中提取writeOptions
-        log.info("尝试使用反射提取writeOptions")
-        // 尝试多种可能的字段名
         val writeOptions = Try(extractValue[Map[String, String]](plan, "writeOptions"))
           .orElse(Try(extractValue[Map[String, String]](plan, "options")))
           .orElse(Try {
@@ -310,6 +279,25 @@ class DorisPlugin
         log.error(s"提取V2元数据失败: ${ex.getMessage}", ex)
         ("unknown", "unknown", "unknown")
     }.get
+  }
+  
+  /**
+   * 从V2写操作中提取原始查询计划，去除多余的Project操作和OverwriteByExpression操作
+   */
+  private def extractOriginalPlan(plan: LogicalPlan): LogicalPlan = {
+    log.info("开始提取原始查询计划")
+    Try {
+      var currentPlan = plan
+
+      if (currentPlan.getClass.getSimpleName.contains("OverwriteByExpression")) {
+        val children = extractValue[Seq[AnyRef]](currentPlan, "children")
+        if (children.nonEmpty) {
+          currentPlan = children.head.asInstanceOf[LogicalPlan]
+        }
+      }
+      log.info(s"最终提取到的原始查询计划: ${currentPlan.getClass.getSimpleName}")
+      currentPlan
+    }.getOrElse(plan)
   }
 
 }
