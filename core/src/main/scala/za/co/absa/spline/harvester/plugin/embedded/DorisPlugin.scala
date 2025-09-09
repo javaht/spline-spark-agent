@@ -37,7 +37,6 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
   private val log = LoggerFactory.getLogger(classOf[DorisPlugin])
 
   override val readNodeProcessor: PartialFunction[LogicalPlan, ReadNodeInfo] = {
-    // 处理所有DataSourceV2Relation，确保不调用父类的extractSourceIdFromTable方法
     case `_: DataSourceV2Relation`(relation) =>
       try {
         val table = extractValue[AnyRef](relation, "table")
@@ -56,11 +55,14 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
           log.warn(s"检测到非Doris表: ${table.getClass.getName}，使用默认SourceIdentifier")
           SourceIdentifier(Some("unknown"), "unknown:unknown")
         }
-
+       val (database,finalTableName) =  parseTableName(tableName)
+        // 记录最终使用的数据库和表名
+        log.info(s"最终使用的数据库: $database, 表名: $finalTableName")
+        
         val props = Map(
-          "table" -> Map("identifier" -> tableName),
           "identifier" -> identifier,
-          "options" -> options)
+          "options" -> options
+        ) ++ createTableIdentifier(database, finalTableName)
         ReadNodeInfo(sourceId, props)
       } catch {
         case ex: Exception =>
@@ -69,21 +71,14 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
       }
 
 
-
-    case plan if isDorisV2ReadPlan(plan) =>{
+    case plan if isDorisV2ReadPlan(plan) =>
       log.info(s"检测到Doris READ_V2操作 - 类名: ${plan.getClass.getSimpleName}")
-
       // 尝试从plan中提取必要信息
       val (database, table) = extractTableIdentifierFromV2ReadPlan(plan)
       log.info(s"提取到表标识符 - 数据库: $database, 表: $table")
-
       // 尝试提取options和identifier
-      val options = Try(extractValue[Map[String, String]](plan, "options"))
-        .orElse(Try(extractValue[Map[String, String]](plan, "readOptions")))
-        .getOrElse(Map.empty)
-
+      val options = Try(extractValue[Map[String, String]](plan, "options")).orElse(Try(extractValue[Map[String, String]](plan, "readOptions"))).getOrElse(Map.empty)
       val identifier = Try(extractValue[AnyRef](plan, "identifier")).getOrElse(null)
-
       val props = Map(
         "table" -> Map("identifier" -> s"$database.$table"),
         "identifier" -> identifier,
@@ -94,15 +89,10 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
       val sourceId = asSourceId(database, table)
       log.info(s"创建的SourceIdentifier: $sourceId")
       ReadNodeInfo(sourceId, props)
-    }
-
   }
 
 
 
-  /**
-   * 处理Doris写操作，确保能捕获所有Doris相关的SaveIntoDataSourceCommand
-   */
   override def writeNodeProcessor: PartialFunction[(SplineAgent.FuncName, LogicalPlan), WriteNodeInfo] = {
     case (_, cmd: SaveIntoDataSourceCommand) if isDorisSaveCommand(cmd) =>
       val database = extractDatabaseFromOptions(cmd.options)
@@ -112,12 +102,10 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
       WriteNodeInfo(DorisPlugin.asSourceIdWithFenodes(fenodes, database, table), cmd.mode, cmd.query, enhancedOptions)
 
     case (_, plan) if isDorisV2WritePlan(plan) =>
-      log.info(s"检测到Doris WRITE_V2操作 - 类名: ${plan.getClass.getSimpleName}")
       val (database, table, fenodes) = extractV2WriteMetadata(plan)
       log.info(s"提取到元数据 - 数据库: $database, 表: $table, fenodes: $fenodes")
       val params = createTableIdentifier(database, table) ++ Map("plan_type" -> plan.getClass.getSimpleName)
       val originalPlan = extractOriginalPlan(plan)
-
 
       WriteNodeInfo(
         srcId = if (fenodes != "unknown") DorisPlugin.asSourceIdWithFenodes(fenodes, database, table) else DorisPlugin.asSourceId(database, table),
@@ -146,12 +134,7 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
     }
   }
 
-  /**
-   * 检测SaveIntoDataSourceCommand是否与Doris相关
-   */
-  // 创建一个与SaveIntoDataSourceCommandPlugin中相同的提取器
   private object RelationProviderExtractor extends AccessorMethodValueExtractor[AnyRef]("provider", "dataSource")
-
 
   private def isDorisV2ReadPlan(plan: LogicalPlan): Boolean = {
     val className = plan.getClass.getSimpleName
@@ -176,36 +159,43 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
 
     log.info(s"开始打印options.keys: ${options.keys}")
     val hasDorisTableId = options.keys.exists(key => key.toLowerCase.contains("doris") &&  (key.toLowerCase.contains("table") || key.toLowerCase.contains("identifier")))
-
     val hasDorisFenodes = options.keys.exists(key => key.toLowerCase.contains("doris") && (key.toLowerCase.contains("fenodes") || key.toLowerCase.contains("fe") || key.toLowerCase.contains("host")))
-
     val hasDorisWriteMode = options.keys.exists(key => key.toLowerCase.contains("doris") && key.toLowerCase.contains("write"))
-
     val hasDorisConn = options.keys.exists(key => key.toLowerCase.contains("doris") && (key.toLowerCase.contains("conn") || key.toLowerCase.contains("url") || key.toLowerCase.contains("jdbc")))
-
     val hasDorisUser = options.keys.exists(key => key.toLowerCase.contains("doris") && key.toLowerCase.contains("user"))
-
     val hasDorisPassword = options.keys.exists(key => key.toLowerCase.contains("doris") && key.toLowerCase.contains("password"))
-
     val hasPathWithDoris = options.get("path").exists(_.toLowerCase.contains("doris"))
     log.info(s"开始打印options.path: ${options.get("path")}")
-
     val isDorisProviderMatch = RelationProviderExtractor.unapply(cmd).exists(isDorisProvider)
-
     log.info(s"开始打印isDorisProviderMatch: $isDorisProviderMatch")
-
     val isDorisFormat = options.get("format").exists(_.toLowerCase.contains("doris"))
-
     hasDorisTableId || hasDorisFenodes || hasDorisWriteMode || hasDorisConn || hasDorisUser || hasDorisPassword || hasPathWithDoris || isDorisProviderMatch || isDorisFormat
   }
 
 
 
+  private def parseTableName(tableName: String): (String, String) = {
+    log.info(s"尝试从tableName解析: $tableName")
+    if (tableName != null && tableName.contains(".")) {
+      val parts = tableName.split("\\.")
+      if (parts.length >= 2) {
+        val db = parts(0)
+        val tbl = parts(1)
+        log.info(s"成功从tableName解析 - 数据库: $db, 表: $tbl")
+        (db, tbl)
+      } else {
+        log.warn(s"tableName格式不正确，无法拆分: $tableName")
+        ("unknown", tableName)
+      }
+    } else {
+      log.warn(s"tableName不包含点号或为空: $tableName")
+      ("unknown", tableName)
+    }
+  }
+
   private def extractDatabaseFromOptions(options: Map[String, String]): String = {
     // 尝试多种可能的表标识符选项名称
-    val tableIdentifier = options.keys.find(key =>
-        key.toLowerCase.contains("doris") &&
-          (key.toLowerCase.contains("table") || key.toLowerCase.contains("identifier")))
+    val tableIdentifier = options.keys.find(key => key.toLowerCase.contains("doris") && (key.toLowerCase.contains("table") || key.toLowerCase.contains("identifier")))
       .flatMap(options.get)
       .orElse(options.get("table.identifier"))
       .orElse(options.get("dbtable"))
@@ -220,9 +210,7 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
   private def extractTableFromOptions(options: Map[String, String]): String = {
 
     // 尝试多种可能的表标识符选项名称
-    val tableIdentifier = options.keys.find(key =>
-        key.toLowerCase.contains("doris") &&
-          (key.toLowerCase.contains("table") || key.toLowerCase.contains("identifier")))
+    val tableIdentifier = options.keys.find(key => key.toLowerCase.contains("doris") && (key.toLowerCase.contains("table") || key.toLowerCase.contains("identifier")))
       .flatMap(options.get)
       .orElse(options.get("table.identifier"))
       .orElse(options.get("dbtable"))
@@ -237,9 +225,7 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
   private def extractFenodesFromOptions(options: Map[String, String]): String = {
 
     // 尝试多种可能的fenodes选项名称
-    val result = options.keys.find(key =>
-        key.toLowerCase.contains("doris") &&
-          (key.toLowerCase.contains("fenodes") || key.toLowerCase.contains("fe") || key.toLowerCase.contains("host")))
+    val result = options.keys.find(key => key.toLowerCase.contains("doris") && (key.toLowerCase.contains("fenodes") || key.toLowerCase.contains("fe") || key.toLowerCase.contains("host")))
       .flatMap(options.get)
       .orElse(options.get("doris.fenodes"))
       .orElse(options.get("fenodes"))
@@ -264,15 +250,12 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
   }
 
   private def extractTableIdentifierFromV2ReadPlan(plan: LogicalPlan): (String, String) = {
-    log.info("开始从V2读操作中提取表标识符")
     if (plan.getClass.getSimpleName.contains("LogicalRelation")) {
       val relation = extractValue[AnyRef](plan, "relation")
       log.info(s"提取到relation: $relation")
       val isDorisRelation = relation.getClass.getName.contains("DorisRelation")
       if (isDorisRelation) {
         val parameters = Try(extractValue[Map[String, String]](relation, "parameters")).getOrElse(Map.empty)
-        log.info(s"从DorisRelation提取到parameters: $parameters")
-
         val tableIdentifierFromParams = parameters.keys.find(key =>
             key.toLowerCase.contains("doris") &&
               (key.toLowerCase.contains("table") || key.toLowerCase.contains("identifier")))
@@ -305,24 +288,17 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
   }
 
 
-  /**
-   * 从V2写操作的LogicalPlan中提取元数据
-   */
   private def extractV2WriteMetadata(plan: LogicalPlan): (String, String, String) = {
-    log.info("开始从V2写操作中提取元数据")
     Try {
-      val planString = plan.toString
         val writeOptions = Try(extractValue[Map[String, String]](plan, "writeOptions"))
           .orElse(Try(extractValue[Map[String, String]](plan, "options")))
           .orElse(Try {
             log.info("尝试从子节点中提取writeOptions")
-            // 尝试从子节点中提取
             val children = extractValue[Seq[AnyRef]](plan, "children")
             children.headOption.map(child => extractValue[Map[String, String]](child, "writeOptions")).getOrElse(Map.empty)
           })
           .getOrElse(Map.empty)
 
-        log.info(s"找到writeOptions: $writeOptions")
 
         val tableIdentifier = writeOptions.getOrElse("doris.table.identifier", "unknown.unknown")
         log.info(s"表标识符: $tableIdentifier")
@@ -339,9 +315,6 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
     }.get
   }
 
-  /**
-   * 从V2写操作中提取原始查询计划，去除多余的Project操作和OverwriteByExpression操作
-   */
   private def extractOriginalPlan(plan: LogicalPlan): LogicalPlan = {
     log.info("开始提取原始查询计划")
     Try {
@@ -362,13 +335,9 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
 }
 
 object DorisPlugin {
-
   object DorisSourceExtractor extends SafeTypeMatchingExtractor[AnyRef]("org.apache.doris.spark.sql.DorisSourceProvider")
 
-
   object `_: DataSourceV2Relation` extends SafeTypeMatchingExtractor[AnyRef]( "org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation")
-
-
 
   def asSourceId(database: String, table: String): SourceIdentifier = {
     val safeDatabase = Option(database).getOrElse("unknown")
@@ -376,7 +345,6 @@ object DorisPlugin {
     val sourceId = s"doris:$safeDatabase.$safeTable"
     SourceIdentifier(Some("doris"), sourceId)
   }
-
 
    def asSourceIdWithFenodes(fenodes: String, database: String, table: String): SourceIdentifier = {
     val sourceId = s"doris://$fenodes/$database/$table"
