@@ -51,12 +51,10 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
           log.info("检测到Doris表，使用特殊处理逻辑")
           SourceIdentifier(Some("doris"), s"doris:$tableName")
         } else {
-          // 对于非Doris表，直接返回默认SourceIdentifier
           log.warn(s"检测到非Doris表: ${table.getClass.getName}，使用默认SourceIdentifier")
           SourceIdentifier(Some("unknown"), "unknown:unknown")
         }
        val (database,finalTableName) =  parseTableName(tableName)
-        // 记录最终使用的数据库和表名
         log.info(s"最终使用的数据库: $database, 表名: $finalTableName")
         
         val props = Map(
@@ -73,10 +71,8 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
 
     case plan if isDorisV2ReadPlan(plan) =>
       log.info(s"检测到Doris READ_V2操作 - 类名: ${plan.getClass.getSimpleName}")
-      // 尝试从plan中提取必要信息
       val (database, table) = extractTableIdentifierFromV2ReadPlan(plan)
       log.info(s"提取到表标识符 - 数据库: $database, 表: $table")
-      // 尝试提取options和identifier
       val options = Try(extractValue[Map[String, String]](plan, "options")).orElse(Try(extractValue[Map[String, String]](plan, "readOptions"))).getOrElse(Map.empty)
       val identifier = Try(extractValue[AnyRef](plan, "identifier")).getOrElse(null)
       val props = Map(
@@ -85,7 +81,6 @@ class DorisPlugin extends Plugin with WriteNodeProcessing  with ReadNodeProcessi
         "options" -> options
       ) ++ createTableIdentifier(database, table) + ("plan_type" -> plan.getClass.getSimpleName)
 
-      // 创建SourceIdentifier并返回ReadNodeInfo
       val sourceId = asSourceId(database, table)
       log.info(s"创建的SourceIdentifier: $sourceId")
       ReadNodeInfo(sourceId, props)
