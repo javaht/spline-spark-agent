@@ -25,7 +25,6 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
   private val TABLE_SEARCH_INDEX: String = "table_search_index"
   private val PIPELINE_SOURCE_TYPE: String = "Spark"
 
-//  private var databasenames: List[String] = List.empty[String]
   override def name = "Openmetadata"
 
 
@@ -77,7 +76,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
     } match {
       case Success(result) => result
       case Failure(exception) =>
-        println(s"Failed to get table entity from OpenMetadata: $exception")
+        logInfo(s"Failed to get table entity from OpenMetadata: $exception")
         throw new Exception(exception)
     }
   }
@@ -85,7 +84,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
   def sendMetadataLineage(jsonData: String): Unit = {
     try {
       val piplinen_id = createOrUpdatePipeline()
-      logDebug(s"原始血缘数据: $jsonData")
+      logInfo(s"原始血缘数据: $jsonData")
       val objectMapper = new ObjectMapper()
       val operations = objectMapper.readTree(jsonData).get("operations")
       val write = operations.get("write")
@@ -106,21 +105,20 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
 
         if (sourceEntity.nonEmpty && targetEntity.nonEmpty) {
           val lineageRequest = createLineageRequest(piplinen_id, sourceEntity, targetEntity, jsonData, i)
-
           try {
             sendRequest(lineageRequest)
             logInfo(s"Successfully created lineage from $sourceTable to $targetTableName")
           } catch {
             case e: Exception =>
-              logError(s"Failed to create lineage from $sourceTable to $targetTableName: ${e.getMessage}")
+              logInfo(s"Failed to create lineage from $sourceTable to $targetTableName: ${e.getMessage}")
           }
         } else {
-          logWarning(s"Skipping lineage creation: sourceEntity.isEmpty=${sourceEntity.isEmpty}, targetEntity.isEmpty=${targetEntity.isEmpty}")
+          logInfo(s"Skipping lineage creation: sourceEntity.isEmpty=${sourceEntity.isEmpty}, targetEntity.isEmpty=${targetEntity.isEmpty}")
         }
       }
     } catch {
       case e: Exception =>
-        logError(s"解析血缘数据时发生异常: ${e.getMessage}")
+        logInfo(s"解析血缘数据时发生异常: ${e.getMessage}")
     }
   }
 
@@ -231,7 +229,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
       val response = request.asString
       if (response.isSuccess) {
         if (response.body == null || response.body.trim.isEmpty) {
-          println(s"Warning: Empty response body received for request: ${request.url}")
+          logInfo(s"Warning: Empty response body received for request: ${request.url}")
           Map.empty[String, Any]
         } else {
           try {
@@ -240,12 +238,12 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
             if (jsonResponse.has("id")) {
               Map("id" -> jsonResponse.get("id").asText())
             } else {
-              println(s"Warning: Response does not contain 'id' field: ${response.body}")
+              logInfo(s"Warning: Response does not contain 'id' field: ${response.body}")
               Map.empty[String, Any]
             }
           } catch {
             case e: Exception =>
-              println(s"Failed to parse JSON response: ${response.body}, error: ${e.getMessage}")
+              logInfo(s"Failed to parse JSON response: ${response.body}, error: ${e.getMessage}")
               Map.empty[String, Any]
           }
         }
@@ -255,7 +253,7 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
     } match {
       case Success(result) => result
       case Failure(exception) =>
-        println(s"Failed to send HTTP request: ${exception.getMessage}")
+        logInfo(s"Failed to send HTTP request: ${exception.getMessage}")
         throw exception
     }
   }
@@ -382,34 +380,147 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
       val attributesMap = createAttributesMap(json)
       val op1OutputList = getOp1OutputListWithNames(json, attributesMap)
       val readsOutputInfo = getReadsOutputInfoWithNames(json, attributesMap)
-      val filteredFunctions = getFilteredFunctionsWithNames(json, attributesMap)
-      val columnLineageJson = generateColumnLineage(json, attributesMap, op1OutputList, readsOutputInfo, filteredFunctions, sourceTableFqn, targetTableFqn)
+
+      // 创建列转换映射
+      val columnTransformationMap = createColumnTransformationMap(json, attributesMap)
+
+      val columnLineageJson = generateColumnLineage(op1OutputList, readsOutputInfo, sourceTableFqn, targetTableFqn, columnTransformationMap)
       val lineageResults = mutable.ListBuffer[Map[String, Any]]()
       for (i <- 0 until columnLineageJson.size()) {
         val lineageObj = columnLineageJson.get(i).asInstanceOf[ObjectNode]
         val fromColumnsArray = lineageObj.get("fromColumns").asInstanceOf[ArrayNode]
         val toColumn = lineageObj.get("toColumn").asText()
-        
+
         val fromColumns = (0 until fromColumnsArray.size()).map { j =>
           fromColumnsArray.get(j).asText()
         }.toList
-        
-        lineageResults += Map(
-          "fromColumns" -> fromColumns,
-          "toColumn" -> toColumn
-        )
+
+        lineageResults += Map("fromColumns" -> fromColumns, "toColumn" -> toColumn)
       }
-      
-      logInfo(s"Generated ${lineageResults.size} column lineage entries for source table index $sourceIndex")
+
+
       lineageResults.toList
     } catch {
       case e: Exception =>
-        logError(s"Failed to parse column level lineage: ${e.getMessage}")
+
         List.empty[Map[String, Any]]
     }
   }
 
+  private def createColumnTransformationMap(jsonObject: JsonNode, attributesMap: mutable.Map[String, String]): mutable.Map[String, String] = {
+    val transformationMap = mutable.Map[String, String]()
 
+    // 获取所有输出列
+    val outputColumns = getOp1OutputListWithNames(jsonObject, attributesMap)
+
+    // 获取所有输入列
+    val inputColumns = mutable.Set[String]()
+    if (jsonObject.has("operations")) {
+      val operationsObj = jsonObject.get("operations")
+      if (operationsObj.has("reads")) {
+        val readsList = operationsObj.get("reads")
+        for (i <- 0 until readsList.size()) {
+          val readObj = readsList.get(i)
+          if (readObj.has("output")) {
+            val outputArray = readObj.get("output")
+            for (j <- 0 until outputArray.size()) {
+              inputColumns += outputArray.get(j).asText()
+            }
+          }
+        }
+      }
+    }
+
+    // 遍历所有属性，查找转换关系
+    if (jsonObject.has("attributes")) {
+      val attributesArray = jsonObject.get("attributes")
+      for (i <- 0 until attributesArray.size()) {
+        val attrObj = attributesArray.get(i)
+        val attrId = attrObj.get("id").asText()
+        val attrName = attrObj.get("name").asText()
+
+        // 如果是输出列
+        if (outputColumns.contains(attrName)) {
+          // 查找转换关系
+          val sourceAttrId = findSourceAttributeId(jsonObject, attrId)
+          if (sourceAttrId.isDefined && inputColumns.contains(sourceAttrId.get)) {
+            transformationMap(attrName) = attributesMap.getOrElse(sourceAttrId.get, sourceAttrId.get)
+          } else if (inputColumns.contains(attrId)) {
+            // 如果没有转换关系，但是本身就是输入列
+            transformationMap(attrName) = attrName
+          }
+        }
+      }
+    }
+
+    transformationMap
+  }
+
+  private def findSourceAttributeId(jsonObject: JsonNode, attrId: String): Option[String] = {
+    // 使用递归和循环检测来查找源属性ID
+    val visited = mutable.Set[String]()
+
+    def findSource(attrId: String): Option[String] = {
+      // 防止循环引用
+      if (visited.contains(attrId)) {
+        return None
+      }
+      visited.add(attrId)
+
+      // 在attributes中查找
+      if (jsonObject.has("attributes")) {
+        val attributesArray = jsonObject.get("attributes")
+        for (i <- 0 until attributesArray.size()) {
+          val attrObj = attributesArray.get(i)
+          if (attrId.equals(attrObj.get("id").asText())) {
+            // 如果有childRefs，则继续查找
+            if (attrObj.has("childRefs")) {
+              val childRefsArray = attrObj.get("childRefs")
+              for (j <- 0 until childRefsArray.size()) {
+                val childRef = childRefsArray.get(j)
+                if (childRef.has("__exprId")) {
+                  val exprId = childRef.get("__exprId").asText()
+                  // 在expressions中查找
+                  if (jsonObject.has("expressions")) {
+                    val expressionsObj = jsonObject.get("expressions")
+                    if (expressionsObj.has("functions")) {
+                      val functionsArray = expressionsObj.get("functions")
+                      for (k <- 0 until functionsArray.size()) {
+                        val funcObj = functionsArray.get(k)
+                        if (exprId.equals(funcObj.get("id").asText())) {
+                          // 查找函数的childRefs中的__attrId
+                          if (funcObj.has("childRefs")) {
+                            val funcChildRefsArray = funcObj.get("childRefs")
+                            for (l <- 0 until funcChildRefsArray.size()) {
+                              val funcChildRef = funcChildRefsArray.get(l)
+                              if (funcChildRef.has("__attrId")) {
+                                val sourceAttrId = funcChildRef.get("__attrId").asText()
+                                // 递归查找
+                                val result = findSource(sourceAttrId)
+                                if (result.isDefined) {
+                                  return result
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            // 如果没有childRefs，则返回当前属性ID
+            return Some(attrId)
+          }
+        }
+      }
+
+      None
+    }
+
+    findSource(attrId)
+  }
 
   private def getStringValue(json: JsonNode, path: String): String = {
     try {
@@ -587,11 +698,11 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
     filteredArray
   }
 
-
-
-  private def generateColumnLineage(jsonObject: JsonNode, attributesMap: mutable.Map[String, String],
-    writeColumns: List[String], readTablesInfo: ArrayNode,
-    columnMappings: ArrayNode, sourceTableFqn: String, targetTableFqn: String): ArrayNode = {
+  private def generateColumnLineage(writeColumns: List[String],
+    readTablesInfo: ArrayNode,
+    sourceTableFqn: String,
+    targetTableFqn: String,
+    columnTransformationMap: mutable.Map[String, String]): ArrayNode = {
 
     val objectMapper = new ObjectMapper()
 
@@ -610,41 +721,43 @@ class OpenmetadataLineageDispatcher(val config: OpenmetadataLineageDispatcherCon
       (s"$database.$table", cols)
     }.toMap
 
-    val columnMapping = (0 until columnMappings.size()).flatMap { i =>
-      val obj = columnMappings.get(i)
-      val columnNamesArray = obj.get("column_names")
-      if (columnNamesArray.size() > 0) {
-        val paramsName = obj.get("params_name").asText()
-        val columnName = columnNamesArray.get(0).asText()
-        Some(paramsName -> columnName)
-      } else {
-        None
-      }
-    }.toMap
 
     val resultArray = objectMapper.createArrayNode()
+    val processedPairs = mutable.Set[String]() // 用于记录已处理的列对，避免重复
 
     writeColumns.foreach { writeCol =>
       // 使用传入的targetTableFqn构建toColumn
       val target = s"$targetTableFqn.$writeCol"
-      val sourceCol = columnMapping.getOrElse(writeCol, writeCol)
 
-      readTableColumns.foreach { case (table, cols) =>
-        if (cols.contains(sourceCol)) {
-          val lineageObj = objectMapper.createObjectNode()
-          val fromColumnsArray = objectMapper.createArrayNode()
-          // 使用传入的sourceTableFqn构建fromColumns
-          fromColumnsArray.add(s"$sourceTableFqn.$sourceCol")
+      // 使用列转换映射来找到源列
+      val sourceCol = columnTransformationMap.getOrElse(writeCol, writeCol)
 
-          lineageObj.set("fromColumns", fromColumnsArray)
-          lineageObj.put("toColumn", target)
-          resultArray.add(lineageObj)
-        }
+      readTableColumns.foreach {
+        case (table, cols) =>
+          if(sourceTableFqn.endsWith(table)){
+            if (cols.contains(sourceCol) ) {
+              // 检查是否已经处理过这个列对
+              val pairKey = s"$sourceCol-$writeCol"
+              if (!processedPairs.contains(pairKey)) {
+                processedPairs.add(pairKey)
+
+                val lineageObj = objectMapper.createObjectNode()
+                val fromColumnsArray = objectMapper.createArrayNode()
+                // 使用传入的sourceTableFqn构建fromColumns
+                fromColumnsArray.add(s"$sourceTableFqn.$sourceCol")
+
+                lineageObj.set("fromColumns", fromColumnsArray)
+                lineageObj.put("toColumn", target)
+                resultArray.add(lineageObj)
+              }
+            }
+          }
       }
     }
 
     resultArray
   }
+
 
 
 }
